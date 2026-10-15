@@ -12,7 +12,8 @@ jobs:
           git clone --depth 1 --branch release-2.28.1 https://github.com/libsdl-org/SDL.git
           cd SDL
           $NDK/ndk-build NDK_PROJECT_PATH=null APP_BUILD_SCRIPT=./Android.mk \
-            APP_PLATFORM=android-24 APP_ABI=armeabi-v7a -j$(nproc)
+            APP_PLATFORM=android-24 APP_ABI=armeabi-v7a \
+            NDK_OUT=$PWD/obj NDK_LIBS_OUT=$PWD/libs -j$(nproc)
           file libs/armeabi-v7a/*.so
           cd ..
           mkdir -p out
@@ -21,4 +22,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: sdl2-armeabi-v7a
-          path: out/*.so￼Enter
+          path: out/*.so
