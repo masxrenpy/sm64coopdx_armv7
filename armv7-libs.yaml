@@ -1,0 +1,26 @@
+name: armv7-libs
+
+on: workflow_dispatch
+
+jobs:
+  lua-armv7:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Compilar Lua 5.3.5 para armeabi-v7a
+        run: |
+          TC=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+          wget -q https://www.lua.org/ftp/lua-5.3.5.tar.gz
+          tar xf lua-5.3.5.tar.gz
+          cd lua-5.3.5/src
+          make liblua.a \
+            CC="$TC/armv7a-linux-androideabi24-clang" \
+            AR="$TC/llvm-ar rcu" \
+            RANLIB="$TC/llvm-ranlib" \
+            MYCFLAGS="-DLUA_USE_POSIX -O2 -fPIC" MYLIBS=""
+          file liblua.a
+          mkdir -p ../../out && cp liblua.a ../../out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: liblua-armeabi-v7a
+          path: out/liblua.a￼Enter
