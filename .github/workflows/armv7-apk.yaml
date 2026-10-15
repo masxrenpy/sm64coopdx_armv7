@@ -155,6 +155,172 @@ jobs:
               q = pathlib.Path(f); t = q.read_text(); assert a in t; q.write_text(t.replace(a, b))
           EOF
           sed -i '/^ *"curl",$/d' platform/app/src/main/java/org/libsdl/app/SDLActivity.java
+          sed -i 's/^#elif __linux__$/#elif __linux__ \&\& !defined(TARGET_ANDROID)/' src/pc/crash_handler.c
+          sed -i 's|^C_FILES += \$(LOCAL_PATH)/platform/app/jni/update_checker_stub.c$|&\nC_FILES += $(LOCAL_PATH)/platform/app/jni/crash_log.c|' Android.mk
+          grep -n "crash_log" Android.mk
+          grep -n "elif __linux__" src/pc/crash_handler.c
+          cat > platform/app/jni/crash_log.c << 'CRASHC'
+          #define _GNU_SOURCE
+          #include <signal.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <stdint.h>
+          #include <stdlib.h>
+          #include <unistd.h>
+          #include <fcntl.h>
+          #include <dlfcn.h>
+          #include <pthread.h>
+          #include <ucontext.h>
+          #include <sys/prctl.h>
+          #include <sys/syscall.h>
+
+          #define CL_DIR "/storage/emulated/0/com.maniscat2.sm64coopdx/"
+
+          typedef struct { uintptr_t lo, hi; } ClRange;
+          static ClRange sExec[768];
+          static int sExecCount = 0;
+          static char sMaps[300000];
+          static struct sigaction sOld[40];
+
+          static void cl_put(int fd, const char *s) { if (fd >= 0) { (void) !write(fd, s, strlen(s)); } }
+
+          static int cl_is_exec(uintptr_t a) {
+              for (int i = 0; i < sExecCount; i++) { if (a >= sExec[i].lo && a < sExec[i].hi) return 1; }
+              return 0;
+          }
+
+          static void cl_load_maps(void) {
+              int mf = open("/proc/self/maps", O_RDONLY);
+              if (mf < 0) return;
+              ssize_t total = 0, n;
+              while (total < (ssize_t) sizeof(sMaps) - 1 && (n = read(mf, sMaps + total, sizeof(sMaps) - 1 - total)) > 0) total += n;
+              close(mf);
+              sMaps[total] = 0;
+              char *line = sMaps;
+              while (*line && sExecCount < 768) {
+                  char *end = strchr(line, '\n');
+                  if (end) *end = 0;
+                  char *p;
+                  uintptr_t lo = strtoul(line, &p, 16);
+                  if (*p == '-') {
+                      uintptr_t hi = strtoul(p + 1, &p, 16);
+                      while (*p == ' ') p++;
+                      if (p[0] == 'r' && p[2] == 'x') { sExec[sExecCount].lo = lo; sExec[sExecCount].hi = hi; sExecCount++; }
+                  }
+                  if (!end) break;
+                  line = end + 1;
+              }
+          }
+
+          static void cl_addr(int fd, const char *label, uintptr_t a) {
+              Dl_info di; char b[600];
+              if (dladdr((void *) a, &di) && di.dli_fname) {
+                  const char *f = strrchr(di.dli_fname, '/'); f = f ? f + 1 : di.dli_fname;
+                  snprintf(b, sizeof b, "%s %08lx %s!%s+%lx [off %lx]\n", label, (unsigned long) a, f,
+                      di.dli_sname ? di.dli_sname : "?",
+                      di.dli_sname ? (unsigned long) (a - (uintptr_t) di.dli_saddr) : 0UL,
+                      (unsigned long) (a - (uintptr_t) di.dli_fbase));
+              } else {
+                  snprintf(b, sizeof b, "%s %08lx (sin simbolo)\n", label, (unsigned long) a);
+              }
+              cl_put(fd, b);
+          }
+
+          static void cl_handler(int sig, siginfo_t *si, void *ctx) {
+              char b[300]; char name[32] = {0};
+              int fd = open(CL_DIR "crash_native.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+              if (fd < 0) fd = open("/sdcard/crash_native.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+              prctl(PR_GET_NAME, (unsigned long) name, 0, 0, 0);
+              snprintf(b, sizeof b, "SENAL %d code %d fault_addr %08lx pid %d tid %d hilo '%s'\n", sig, si->si_code,
+                  (unsigned long) si->si_addr, (int) getpid(), (int) syscall(__NR_gettid), name);
+              cl_put(fd, b);
+          #if defined(__arm__)
+              ucontext_t *uc = (ucontext_t *) ctx;
+              unsigned long *r = &uc->uc_mcontext.arm_r0;
+              cl_load_maps();
+              for (int i = 0; i < 16; i++) {
+                  snprintf(b, sizeof b, "r%d=%08lx%s", i, r[i], (i % 4 == 3) ? "\n" : " ");
+                  cl_put(fd, b);
+              }
+              cl_addr(fd, "PC", uc->uc_mcontext.arm_pc);
+              cl_addr(fd, "LR", uc->uc_mcontext.arm_lr);
+              cl_put(fd, "--- pila (candidatos) ---\n");
+              uintptr_t top = 0; pthread_attr_t at; void *sa; size_t ss;
+              if (pthread_getattr_np(pthread_self(), &at) == 0) { pthread_attr_getstack(&at, &sa, &ss); top = (uintptr_t) sa + ss; }
+              uintptr_t *sp = (uintptr_t *) uc->uc_mcontext.arm_sp;
+              int shown = 0;
+              for (int i = 0; top && (uintptr_t) (sp + i) < top && i < 6000 && shown < 70; i++) {
+                  uintptr_t w = sp[i];
+                  if (cl_is_exec(w)) { snprintf(b, sizeof b, "#%d", shown); cl_addr(fd, b, w); shown++; }
+              }
+          #endif
+              if (fd >= 0) close(fd);
+              sigaction(sig, &sOld[sig], NULL);
+              if (sig == SIGABRT) raise(sig);
+          }
+
+          __attribute__((constructor)) static void cl_init(void) {
+              int lf = open(CL_DIR "game_log.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+              if (lf >= 0) {
+                  dup2(lf, 1); dup2(lf, 2); close(lf);
+                  setvbuf(stdout, NULL, _IOLBF, 0);
+                  setvbuf(stderr, NULL, _IONBF, 0);
+              }
+              struct sigaction sa;
+              memset(&sa, 0, sizeof sa);
+              sa.sa_sigaction = cl_handler;
+              sigemptyset(&sa.sa_mask);
+              sa.sa_flags = SA_SIGINFO;
+              int sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP };
+              for (int i = 0; i < 6; i++) { sigaction(sigs[i], &sa, &sOld[sigs[i]]); }
+          }
+          CRASHC
+          cat > platform/app/src/main/java/com/maniscat2/sm64coopdx/sm64coopdxActivity.java << 'JAVAEOF'
+          package com.maniscat2.sm64coopdx;
+
+          import android.os.Bundle;
+          import org.libsdl.app.SDLActivity;
+          import java.io.FileOutputStream;
+          import java.io.InputStream;
+          import java.io.PrintWriter;
+          import java.io.StringWriter;
+
+          public class sm64coopdxActivity extends SDLActivity
+          {
+              private static final String DIR = "/storage/emulated/0/com.maniscat2.sm64coopdx/";
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  final Thread.UncaughtExceptionHandler prev = Thread.getDefaultUncaughtExceptionHandler();
+                  Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+                      public void uncaughtException(Thread t, Throwable e) {
+                          try {
+                              StringWriter sw = new StringWriter();
+                              e.printStackTrace(new PrintWriter(sw));
+                              FileOutputStream o = new FileOutputStream(DIR + "crash_java.txt");
+                              o.write(sw.toString().getBytes());
+                              o.close();
+                          } catch (Throwable ignored) { }
+                          if (prev != null) prev.uncaughtException(t, e);
+                      }
+                  });
+                  super.onCreate(savedInstanceState);
+                  new Thread(new Runnable() {
+                      public void run() {
+                          try {
+                              Process p = Runtime.getRuntime().exec(new String[] { "logcat", "-d", "-v", "threadtime" });
+                              InputStream in = p.getInputStream();
+                              FileOutputStream o = new FileOutputStream(DIR + "last_logcat.txt");
+                              byte[] buf = new byte[8192];
+                              int n;
+                              while ((n = in.read(buf)) > 0) o.write(buf, 0, n);
+                              o.close();
+                          } catch (Throwable ignored) { }
+                      }
+                  }).start();
+              }
+          }
+          JAVAEOF
           git diff --stat
 
       - name: Make del host (genera archivos del juego)
