@@ -154,6 +154,7 @@ jobs:
                           ('platform/app/build.gradle', "abiFilters 'arm64-v8a', 'x86_64'", "abiFilters 'armeabi-v7a'")]:
               q = pathlib.Path(f); t = q.read_text(); assert a in t; q.write_text(t.replace(a, b))
           EOF
+          sed -i '/^ *"curl",$/d' platform/app/src/main/java/org/libsdl/app/SDLActivity.java
           git diff --stat
 
       - name: Make del host (genera archivos del juego)
@@ -171,6 +172,7 @@ jobs:
           apksigner sign --key platform/android/key.pk8 --cert platform/android/certificate.pem \
             platform/app/build/outputs/apk/release/app-release-unsigned.apk
           mkdir -p out && cp platform/app/build/outputs/apk/release/app-release-unsigned.apk out/sm64coopdx_armv7.apk
+          unzip -l out/sm64coopdx_armv7.apk | grep -E "lib/|\.so"
 
       - uses: actions/upload-artifact@v4
         with:
