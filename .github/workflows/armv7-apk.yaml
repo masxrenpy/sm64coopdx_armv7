@@ -335,6 +335,12 @@ jobs:
             echo "=== ERRORES ==="; grep -n -E "error|\*\*\*" make.log | head -30
             echo "=== FINAL ==="; tail -20 make.log; exit 1; }
 
+      - name: Convertir datos de sonido a 32 bits
+        run: |
+          SD=$(dirname $(find build -name sound_data.ctl | head -1))
+          echo "Carpeta de sonido: $SD"
+          python3 tools/convert_sound_32.py "$SD"
+
       - name: Gradle (APK de 32 bits)
         run: |
           chmod +x platform/gradlew
