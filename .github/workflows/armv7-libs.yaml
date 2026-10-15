@@ -1,5 +1,4 @@
 name: armv7-libs
-
 on: workflow_dispatch
 
 jobs:
@@ -19,8 +18,39 @@ jobs:
             MYCFLAGS="-DLUA_USE_POSIX -O2 -fPIC" MYLIBS=""
           file liblua.a
           mkdir -p ../../out && cp liblua.a ../../out/
-
       - uses: actions/upload-artifact@v4
         with:
           name: liblua-armeabi-v7a
           path: out/liblua.a
+
+  coopnet-armv7:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Compilar libjuice y coopnet para armeabi-v7a
+        run: |
+          set -e
+          NDK=$ANDROID_NDK_ROOT
+          TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
+          git clone --depth 1 --branch v1.6.2 https://github.com/paullouisageneau/libjuice.git
+          cmake -S libjuice -B jbuild \
+            -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=armeabi-v7a -DANDROID_PLATFORM=android-24 \
+            -DBUILD_SHARED_LIBS=OFF -DNO_TESTS=ON -DNO_SERVER=ON \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build jbuild -j$(nproc)
+          find jbuild -name '*.a'
+          git clone --depth 1 https://github.com/coop-deluxe/coopnet.git
+          cd coopnet
+          make lib CXX="$TC/armv7a-linux-androideabi24-clang++" \
+            CXXFLAGS="-Wno-unused-function -std=c++11 -fPIC -DJUICE_STATIC -O2" \
+            LIBS=""
+          $TC/llvm-ar rcs bin/libcoopnet.a bin/o/common/*.o
+          file bin/o/common/*.o | head -3
+          cd ..
+          mkdir -p out
+          cp coopnet/bin/libcoopnet.a out/
+          cp $(find jbuild -name '*.a') out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libcoopnet-libjuice-armeabi-v7a
+          path: out/*.a
