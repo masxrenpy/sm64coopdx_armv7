@@ -1,0 +1,113 @@
+name: armv7-apk
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Instalar dependencias y SDK
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential git python3 libglew-dev libsdl2-dev libz-dev libcurl4-openssl-dev g++ zip unzip wget apksigner
+          mkdir -p $HOME/android-sdk/cmdline-tools
+          cd $HOME/android-sdk/cmdline-tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O tools.zip
+          unzip -q tools.zip && rm tools.zip
+          mv cmdline-tools latest
+          export ANDROID_HOME=$HOME/android-sdk
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+          echo "sdk.dir=$HOME/android-sdk" > $GITHUB_WORKSPACE/platform/local.properties
+
+      - name: Compilar bibliotecas armeabi-v7a
+        run: |
+          set -e
+          W=$GITHUB_WORKSPACE
+          NDK=$ANDROID_NDK_ROOT
+          TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
+          mkdir -p $W/lib/lua/android/armeabi-v7a $W/lib/coopnet/android/armeabi-v7a $W/lib/sdl2/android/armeabi-v7a
+          mkdir -p $HOME/w && cd $HOME/w
+
+          # Lua
+          wget -q https://www.lua.org/ftp/lua-5.3.5.tar.gz && tar xf lua-5.3.5.tar.gz
+          (cd lua-5.3.5/src && make liblua.a CC="$TC/armv7a-linux-androideabi24-clang" \
+            AR="$TC/llvm-ar rcu" RANLIB="$TC/llvm-ranlib" \
+            MYCFLAGS="-DLUA_USE_POSIX -O2 -fPIC" MYLIBS="" && \
+            cp liblua.a $W/lib/lua/android/armeabi-v7a/)
+
+          # libjuice + coopnet
+          git clone -q --depth 1 --branch v1.6.2 https://github.com/paullouisageneau/libjuice.git
+          cmake -S libjuice -B jbuild -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=armeabi-v7a -DANDROID_PLATFORM=android-24 -DBUILD_SHARED_LIBS=OFF \
+            -DNO_TESTS=ON -DNO_SERVER=ON -DCMAKE_BUILD_TYPE=Release > /dev/null
+          cmake --build jbuild -j$(nproc) > /dev/null
+          git clone -q --depth 1 https://github.com/coop-deluxe/coopnet.git
+          (cd coopnet && make lib CXX="$TC/armv7a-linux-androideabi24-clang++" \
+            CXXFLAGS="-Wno-unused-function -std=c++11 -fPIC -DJUICE_STATIC -O2" LIBS="" && \
+            $TC/llvm-ar rcs bin/libcoopnet.a bin/o/common/*.o && \
+            cp bin/libcoopnet.a $W/lib/coopnet/android/armeabi-v7a/)
+          cp $(find jbuild -name '*.a' | head -1) $W/lib/coopnet/android/armeabi-v7a/libjuice.a
+
+          # SDL2
+          git clone -q --depth 1 --branch release-2.28.1 https://github.com/libsdl-org/SDL.git
+          cd SDL
+          grep -rl "ALooper_pollAll" src | xargs sed -i 's/ALooper_pollAll/ALooper_pollOnce/g'
+          $NDK/ndk-build NDK_PROJECT_PATH=null APP_BUILD_SCRIPT=./Android.mk \
+            APP_PLATFORM=android-24 APP_ABI=armeabi-v7a \
+            NDK_OUT=$PWD/obj NDK_LIBS_OUT=$PWD/libs -j$(nproc) > /dev/null 2>&1
+          cp libs/armeabi-v7a/libSDL2.so $W/lib/sdl2/android/armeabi-v7a/
+          ls -l $W/lib/*/android/armeabi-v7a/
+
+      - name: Parchear configuracion para 32 bits
+        run: |
+          cat > platform/app/jni/update_checker_stub.c << 'EOF'
+          #include <stdbool.h>
+          bool gUpdateMessage = false;
+          void show_update_popup(void) {}
+          void check_for_updates(void) {}
+          EOF
+          python3 - << 'EOF'
+          import re, pathlib
+          p = pathlib.Path('Android.mk'); s = p.read_text()
+          s = s.replace('ifeq ($(TARGET_ARCH_ABI),arm64-v8a)', 'ifneq ($(filter arm64-v8a armeabi-v7a,$(TARGET_ARCH_ABI)),)')
+          s = re.sub(r'# Curl\ninclude \$\(CLEAR_VARS\)\nLOCAL_MODULE := curl\n.*?PREBUILT_SHARED_LIBRARY\)\n', '', s, flags=re.S)
+          s = s.replace('LOCAL_SHARED_LIBRARIES := sdl2 curl', 'LOCAL_SHARED_LIBRARIES := sdl2')
+          old = 'C_FILES := $(filter-out $(LOCAL_PATH)/src/game/main.c,$(C_FILES))'
+          new = 'C_FILES := $(filter-out $(LOCAL_PATH)/src/game/main.c $(LOCAL_PATH)/src/pc/update_checker.c,$(C_FILES))\nC_FILES += $(LOCAL_PATH)/platform/app/jni/update_checker_stub.c'
+          assert old in s
+          s = s.replace(old, new)
+          p.write_text(s)
+          for f, a, b in [('platform/app/jni/Application.mk', 'APP_ABI := arm64-v8a x86_64', 'APP_ABI := armeabi-v7a'),
+                          ('platform/app/build.gradle', "abiFilters 'arm64-v8a', 'x86_64'", "abiFilters 'armeabi-v7a'")]:
+              q = pathlib.Path(f); t = q.read_text(); assert a in t; q.write_text(t.replace(a, b))
+          EOF
+          git diff --stat
+
+      - name: Make del host (genera archivos del juego)
+        run: |
+          make -j$(nproc) TOUCH_CONTROLS=1 > make.log 2>&1 || {
+            echo "=== ERRORES ==="; grep -n -E "error|\*\*\*" make.log | head -30
+            echo "=== FINAL ==="; tail -20 make.log; exit 1; }
+
+      - name: Gradle (APK de 32 bits)
+        run: |
+          chmod +x platform/gradlew
+          ./platform/gradlew assembleRelease > gradle.log 2>&1 || {
+            echo "=== ERRORES ==="; grep -n -E "error:|undefined|FAILED|What went wrong|Execution failed" gradle.log | head -40
+            echo "=== FINAL ==="; tail -30 gradle.log; exit 1; }
+          apksigner sign --key platform/android/key.pk8 --cert platform/android/certificate.pem \
+            platform/app/build/outputs/apk/release/app-release-unsigned.apk
+          mkdir -p out && cp platform/app/build/outputs/apk/release/app-release-unsigned.apk out/sm64coopdx_armv7.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sm64coopdx-armv7-apk
+          path: out/sm64coopdx_armv7.apk￼Enter
