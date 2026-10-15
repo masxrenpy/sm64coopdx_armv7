@@ -1,0 +1,24 @@
+name: armv7-sdl2
+on: workflow_dispatch
+
+jobs:
+  sdl2-armv7:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Compilar SDL2 2.28.1 para armeabi-v7a
+        run: |
+          set -e
+          NDK=$ANDROID_NDK_ROOT
+          git clone --depth 1 --branch release-2.28.1 https://github.com/libsdl-org/SDL.git
+          cd SDL
+          $NDK/ndk-build NDK_PROJECT_PATH=null APP_BUILD_SCRIPT=./Android.mk \
+            APP_PLATFORM=android-24 APP_ABI=armeabi-v7a -j$(nproc)
+          file libs/armeabi-v7a/*.so
+          cd ..
+          mkdir -p out
+          cp SDL/libs/armeabi-v7a/*.so out/
+          cp $NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/arm-linux-androideabi/libc++_shared.so out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdl2-armeabi-v7a
+          path: out/*.so￼Enter
