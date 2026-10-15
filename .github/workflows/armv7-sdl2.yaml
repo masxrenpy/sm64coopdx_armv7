@@ -1,5 +1,4 @@
 name: armv7-sdl2
-
 on: workflow_dispatch
 
 jobs:
@@ -14,12 +13,18 @@ jobs:
           cd SDL
           $NDK/ndk-build NDK_PROJECT_PATH=null APP_BUILD_SCRIPT=./Android.mk \
             APP_PLATFORM=android-24 APP_ABI=armeabi-v7a \
-            NDK_OUT=$PWD/obj NDK_LIBS_OUT=$PWD/libs -j$(nproc)
+            NDK_OUT=$PWD/obj NDK_LIBS_OUT=$PWD/libs -j$(nproc) > build.log 2>&1 || {
+              echo "=== ERRORES ==="
+              grep -n -E "error:|\*\*\*|undefined|No such file|cannot find" build.log | head -40
+              echo "=== FINAL DEL LOG ==="
+              tail -25 build.log
+              exit 1
+            }
           file libs/armeabi-v7a/*.so
           cd ..
           mkdir -p out
           cp SDL/libs/armeabi-v7a/*.so out/
-
+          cp $NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/arm-linux-androideabi/libc++_shared.so out/
       - uses: actions/upload-artifact@v4
         with:
           name: sdl2-armeabi-v7a
