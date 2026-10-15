@@ -1,5 +1,5 @@
-yaml
 name: armv7-libs
+
 on: workflow_dispatch
 
 jobs:
@@ -19,7 +19,8 @@ jobs:
             MYCFLAGS="-DLUA_USE_POSIX -O2 -fPIC" MYLIBS=""
           file liblua.a
           mkdir -p ../../out && cp liblua.a ../../out/
+
       - uses: actions/upload-artifact@v4
         with:
           name: liblua-armeabi-v7a
-          path: out/liblua.a￼Enter
+          path: out/liblua.a
