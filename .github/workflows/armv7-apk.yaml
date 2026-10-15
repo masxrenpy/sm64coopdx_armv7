@@ -60,6 +60,71 @@ jobs:
           git clone -q --depth 1 --branch release-2.28.1 https://github.com/libsdl-org/SDL.git
           cd SDL
           grep -rl "ALooper_pollAll" src | xargs sed -i 's/ALooper_pollAll/ALooper_pollOnce/g'
+          python3 - << 'EOF'
+          import pathlib
+          h = pathlib.Path('include/SDL_system.h'); t = h.read_text()
+          decl = 'extern DECLSPEC const char * SDLCALL SDL_AndroidGetExternalStoragePath(void);'
+          assert decl in t
+          t = t.replace(decl, decl + '\nextern DECLSPEC const char * SDLCALL SDL_AndroidGetTopExternalStoragePath(void);\nextern DECLSPEC void SDLCALL SDL_AndroidCopyAssetFilesToDir(const char *destpath);')
+          h.write_text(t)
+
+          c = pathlib.Path('src/core/android/SDL_android.c'); s = c.read_text()
+          marker = 'const char *SDL_AndroidGetExternalStoragePath(void)\n{'
+          assert marker in s
+          code = '''const char *SDL_AndroidGetTopExternalStoragePath(void)
+          {
+              static char *s_TopExternalPath = NULL;
+              if (s_TopExternalPath == NULL) {
+                  struct LocalReferenceHolder refs = LocalReferenceHolder_Setup(__FUNCTION__);
+                  jclass envClass;
+                  jmethodID mid;
+                  jobject fileObject;
+                  jstring pathString;
+                  const char *path;
+                  JNIEnv *env = Android_JNI_GetEnv();
+                  if (!LocalReferenceHolder_Init(&refs, env)) {
+                      LocalReferenceHolder_Cleanup(&refs);
+                      return NULL;
+                  }
+                  envClass = (*env)->FindClass(env, "android/os/Environment");
+                  mid = (*env)->GetStaticMethodID(env, envClass, "getExternalStorageDirectory", "()Ljava/io/File;");
+                  fileObject = (*env)->CallStaticObjectMethod(env, envClass, mid);
+                  if (!fileObject) {
+                      SDL_SetError("Couldn't get top external directory");
+                      LocalReferenceHolder_Cleanup(&refs);
+                      return NULL;
+                  }
+                  mid = (*env)->GetMethodID(env, (*env)->GetObjectClass(env, fileObject), "getAbsolutePath", "()Ljava/lang/String;");
+                  pathString = (jstring)(*env)->CallObjectMethod(env, fileObject, mid);
+                  path = (*env)->GetStringUTFChars(env, pathString, NULL);
+                  s_TopExternalPath = SDL_strdup(path);
+                  (*env)->ReleaseStringUTFChars(env, pathString, path);
+                  LocalReferenceHolder_Cleanup(&refs);
+              }
+              return s_TopExternalPath;
+          }
+
+          void SDL_AndroidCopyAssetFilesToDir(const char *destpath)
+          {
+              JNIEnv *env = Android_JNI_GetEnv();
+              jmethodID mid;
+              jstring jdest;
+              if (!env || !destpath) {
+                  return;
+              }
+              mid = (*env)->GetStaticMethodID(env, mActivityClass, "copyAssetFilesToDir", "(Ljava/lang/String;)V");
+              if (!mid) {
+                  (*env)->ExceptionClear(env);
+                  return;
+              }
+              jdest = (*env)->NewStringUTF(env, destpath);
+              (*env)->CallStaticVoidMethod(env, mActivityClass, mid, jdest);
+              (*env)->DeleteLocalRef(env, jdest);
+          }
+
+          '''
+          c.write_text(s.replace(marker, code + marker))
+          EOF
           $NDK/ndk-build NDK_PROJECT_PATH=null APP_BUILD_SCRIPT=./Android.mk \
             APP_PLATFORM=android-24 APP_ABI=armeabi-v7a \
             NDK_OUT=$PWD/obj NDK_LIBS_OUT=$PWD/libs -j$(nproc) > /dev/null 2>&1
@@ -110,4 +175,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: sm64coopdx-armv7-apk
-          path: out/sm64coopdx_armv7.apk￼Enter
+          path: out/sm64coopdx_armv7.apk
