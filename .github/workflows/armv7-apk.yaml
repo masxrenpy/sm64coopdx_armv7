@@ -155,7 +155,13 @@ jobs:
               q = pathlib.Path(f); t = q.read_text(); assert a in t; q.write_text(t.replace(a, b))
           EOF
           sed -i '/^ *"curl",$/d' platform/app/src/main/java/org/libsdl/app/SDLActivity.java
-          sed -i 's/^#elif __linux__$/#elif __linux__ \&\& !defined(TARGET_ANDROID)/' src/pc/crash_handler.c
+          python3 - << 'PYEOF'
+          import pathlib
+          p = pathlib.Path('src/pc/crash_handler.c'); t = p.read_text()
+          old = 'SetUnhandledExceptionFilter(crash_handler);\n#elif __linux__'
+          assert t.count(old) == 1
+          p.write_text(t.replace(old, 'SetUnhandledExceptionFilter(crash_handler);\n#elif __linux__ && !defined(TARGET_ANDROID)'))
+          PYEOF
           sed -i 's|^C_FILES += \$(LOCAL_PATH)/platform/app/jni/update_checker_stub.c$|&\nC_FILES += $(LOCAL_PATH)/platform/app/jni/crash_log.c|' Android.mk
           grep -n "crash_log" Android.mk
           grep -n "elif __linux__" src/pc/crash_handler.c
