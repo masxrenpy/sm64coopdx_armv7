@@ -327,6 +327,8 @@ jobs:
               }
           }
           JAVAEOF
+          sed -i 's/, sizeof(void\*))/, 8)/' src/game/memory.c
+          grep -n "ALIGN_UP" src/game/memory.c
           git diff --stat
 
       - name: Make del host (genera archivos del juego)
