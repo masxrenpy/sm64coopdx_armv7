@@ -1,5 +1,15 @@
 name: armv7-apk
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      neon:
+        description: 'Activar NEON'
+        type: boolean
+        default: false
+      modo_arm:
+        description: 'Compilar en modo ARM (no Thumb)'
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -343,6 +353,13 @@ jobs:
           echo "Carpeta de sonido: $SD"
           python3 tools/convert_sound_32.py "$SD"
 
+      - name: Variantes de optimizacion
+        run: |
+          if [ "${{ inputs.neon }}" = "true" ]; then sed -i '/^LOCAL_CFLAGS := /a LOCAL_ARM_NEON := true' Android.mk; fi
+          if [ "${{ inputs.modo_arm }}" = "true" ]; then sed -i '/^LOCAL_CFLAGS := /a LOCAL_ARM_MODE := arm' Android.mk; fi
+          grep -n "LOCAL_ARM" Android.mk || echo "sin variantes"
+
+      
       - name: Gradle (APK de 32 bits)
         run: |
           chmod +x platform/gradlew
