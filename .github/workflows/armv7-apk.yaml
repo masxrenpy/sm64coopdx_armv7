@@ -60,6 +60,18 @@ jobs:
             -DNO_TESTS=ON -DNO_SERVER=ON -DCMAKE_BUILD_TYPE=Release > /dev/null
           cmake --build jbuild -j$(nproc) > /dev/null
           git clone -q --depth 1 https://github.com/coop-deluxe/coopnet.git
+          python3 - << 'PYEOF'
+          import pathlib
+          h = pathlib.Path('coopnet/common/mpacket.hpp'); t = h.read_text()
+          assert 'std::size_t hash;' in t and 'mVoidDataSize - sizeof(std::size_t)' in t
+          t = t.replace('std::size_t hash;', 'uint64_t hash;').replace('mVoidDataSize - sizeof(std::size_t)', 'mVoidDataSize - sizeof(uint64_t)')
+          h.write_text(t)
+          c = pathlib.Path('coopnet/common/client.cpp'); s = c.read_text()
+          old = '    mConnection->Begin(nullptr);\n'
+          assert old in s
+          s = s.replace(old, old + '    LOG_INFO("INFO packet: sizeof %d, hash %llx", (int) sizeof(MPacketInfoData), (unsigned long long) hashFile());\n', 1)
+          c.write_text(s)
+          PYEOF
           (cd coopnet && make lib CXX="$TC/armv7a-linux-androideabi24-clang++" \
             CXXFLAGS="-Wno-unused-function -std=c++11 -fPIC -DJUICE_STATIC -DLOGGING -O2" LIBS="" && \
             $TC/llvm-ar rcs bin/libcoopnet.a bin/o/common/*.o && \
