@@ -61,7 +61,7 @@ jobs:
           cmake --build jbuild -j$(nproc) > /dev/null
           git clone -q --depth 1 https://github.com/coop-deluxe/coopnet.git
           (cd coopnet && make lib CXX="$TC/armv7a-linux-androideabi24-clang++" \
-            CXXFLAGS="-Wno-unused-function -std=c++11 -fPIC -DJUICE_STATIC -O2" LIBS="" && \
+            CXXFLAGS="-Wno-unused-function -std=c++11 -fPIC -DJUICE_STATIC -DLOGGING -O2" LIBS="" && \
             $TC/llvm-ar rcs bin/libcoopnet.a bin/o/common/*.o && \
             cp bin/libcoopnet.a $W/lib/coopnet/android/armeabi-v7a/)
           cp $(find jbuild -name '*.a' | head -1) $W/lib/coopnet/android/armeabi-v7a/libjuice.a
