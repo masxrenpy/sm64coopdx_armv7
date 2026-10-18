@@ -309,7 +309,6 @@ jobs:
           import android.os.Bundle;
           import org.libsdl.app.SDLActivity;
           import java.io.FileOutputStream;
-          import java.io.InputStream;
           import java.io.PrintWriter;
           import java.io.StringWriter;
 
@@ -333,19 +332,6 @@ jobs:
                       }
                   });
                   super.onCreate(savedInstanceState);
-                  new Thread(new Runnable() {
-                      public void run() {
-                          try {
-                              Process p = Runtime.getRuntime().exec(new String[] { "logcat", "-d", "-v", "threadtime" });
-                              InputStream in = p.getInputStream();
-                              FileOutputStream o = new FileOutputStream(DIR + "last_logcat.txt");
-                              byte[] buf = new byte[8192];
-                              int n;
-                              while ((n = in.read(buf)) > 0) o.write(buf, 0, n);
-                              o.close();
-                          } catch (Throwable ignored) { }
-                      }
-                  }).start();
               }
           }
           JAVAEOF
