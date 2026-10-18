@@ -1,0 +1,429 @@
+name: release-armv7
+
+on:
+  push:
+    tags:
+      - 'v*-armv7*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  APP_ID: com.maniscat2.sm64coopdx32bits
+  APP_NAME: "Super Mario 64 Coop Deluxe (32-bit)"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Comprobar identificador de paquete
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if [ "$APP_ID" = "com.maniscat2.sm64coopdx" ]; then
+            echo "Cambia APP_ID en el workflow antes de publicar una release."
+            exit 1
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Instalar dependencias y SDK
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential git python3 libglew-dev libsdl2-dev libz-dev libcurl4-openssl-dev g++ zip unzip wget apksigner
+          mkdir -p $HOME/android-sdk/cmdline-tools
+          cd $HOME/android-sdk/cmdline-tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O tools.zip
+          unzip -q tools.zip && rm tools.zip
+          mv cmdline-tools latest
+          export ANDROID_HOME=$HOME/android-sdk
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+          echo "sdk.dir=$HOME/android-sdk" > $GITHUB_WORKSPACE/platform/local.properties
+
+      - name: Compilar bibliotecas armeabi-v7a
+        run: |
+          set -e
+          W=$GITHUB_WORKSPACE
+          NDK=$ANDROID_NDK_ROOT
+          TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
+          mkdir -p $W/lib/lua/android/armeabi-v7a $W/lib/coopnet/android/armeabi-v7a $W/lib/sdl2/android/armeabi-v7a
+          mkdir -p $HOME/w && cd $HOME/w
+
+          # Lua 5.3.5
+          wget -q https://www.lua.org/ftp/lua-5.3.5.tar.gz && tar xf lua-5.3.5.tar.gz
+          (cd lua-5.3.5/src && make liblua.a CC="$TC/armv7a-linux-androideabi24-clang" \
+            AR="$TC/llvm-ar rcu" RANLIB="$TC/llvm-ranlib" \
+            MYCFLAGS="-DLUA_USE_POSIX -O2 -fPIC" MYLIBS="" && \
+            cp liblua.a $W/lib/lua/android/armeabi-v7a/)
+
+          # libjuice 1.6.2 + coopnet (commit fijado)
+          git clone -q --depth 1 --branch v1.6.2 https://github.com/paullouisageneau/libjuice.git
+          cmake -S libjuice -B jbuild -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=armeabi-v7a -DANDROID_PLATFORM=android-24 -DBUILD_SHARED_LIBS=OFF \
+            -DNO_TESTS=ON -DNO_SERVER=ON -DCMAKE_BUILD_TYPE=Release > /dev/null
+          cmake --build jbuild -j$(nproc) > /dev/null
+          git clone -q https://github.com/coop-deluxe/coopnet.git
+          git -C coopnet checkout -q 9d9b3dd
+          python3 - << 'PYNET'
+          import pathlib
+          # El campo hash del paquete de identificacion debe medir 8 bytes en todas las plataformas.
+          h = pathlib.Path('coopnet/common/mpacket.hpp'); t = h.read_text()
+          assert 'std::size_t hash;' in t and 'mVoidDataSize - sizeof(std::size_t)' in t
+          t = t.replace('std::size_t hash;', 'uint64_t hash;').replace('mVoidDataSize - sizeof(std::size_t)', 'mVoidDataSize - sizeof(uint64_t)')
+          h.write_text(t)
+          PYNET
+          (cd coopnet && make lib CXX="$TC/armv7a-linux-androideabi24-clang++" \
+            CXXFLAGS="-Wno-unused-function -std=c++11 -fPIC -DJUICE_STATIC -O2" LIBS="" && \
+            $TC/llvm-ar rcs bin/libcoopnet.a bin/o/common/*.o && \
+            cp bin/libcoopnet.a $W/lib/coopnet/android/armeabi-v7a/)
+          cp $(find jbuild -name '*.a' | head -1) $W/lib/coopnet/android/armeabi-v7a/libjuice.a
+
+          # SDL2 2.28.1 con las dos funciones que usa el proyecto
+          git clone -q --depth 1 --branch release-2.28.1 https://github.com/libsdl-org/SDL.git
+          cd SDL
+          grep -rl "ALooper_pollAll" src | xargs sed -i 's/ALooper_pollAll/ALooper_pollOnce/g'
+          python3 - << 'PYSDL'
+          import pathlib
+          h = pathlib.Path('include/SDL_system.h'); t = h.read_text()
+          decl = 'extern DECLSPEC const char * SDLCALL SDL_AndroidGetExternalStoragePath(void);'
+          assert decl in t
+          t = t.replace(decl, decl + '\nextern DECLSPEC const char * SDLCALL SDL_AndroidGetTopExternalStoragePath(void);\nextern DECLSPEC void SDLCALL SDL_AndroidCopyAssetFilesToDir(const char *destpath);')
+          h.write_text(t)
+
+          c = pathlib.Path('src/core/android/SDL_android.c'); s = c.read_text()
+          marker = 'const char *SDL_AndroidGetExternalStoragePath(void)\n{'
+          assert marker in s
+          code = '''const char *SDL_AndroidGetTopExternalStoragePath(void)
+          {
+              static char *s_TopExternalPath = NULL;
+              if (s_TopExternalPath == NULL) {
+                  struct LocalReferenceHolder refs = LocalReferenceHolder_Setup(__FUNCTION__);
+                  jclass envClass;
+                  jmethodID mid;
+                  jobject fileObject;
+                  jstring pathString;
+                  const char *path;
+                  JNIEnv *env = Android_JNI_GetEnv();
+                  if (!LocalReferenceHolder_Init(&refs, env)) {
+                      LocalReferenceHolder_Cleanup(&refs);
+                      return NULL;
+                  }
+                  envClass = (*env)->FindClass(env, "android/os/Environment");
+                  mid = (*env)->GetStaticMethodID(env, envClass, "getExternalStorageDirectory", "()Ljava/io/File;");
+                  fileObject = (*env)->CallStaticObjectMethod(env, envClass, mid);
+                  if (!fileObject) {
+                      SDL_SetError("Couldn't get top external directory");
+                      LocalReferenceHolder_Cleanup(&refs);
+                      return NULL;
+                  }
+                  mid = (*env)->GetMethodID(env, (*env)->GetObjectClass(env, fileObject), "getAbsolutePath", "()Ljava/lang/String;");
+                  pathString = (jstring)(*env)->CallObjectMethod(env, fileObject, mid);
+                  path = (*env)->GetStringUTFChars(env, pathString, NULL);
+                  s_TopExternalPath = SDL_strdup(path);
+                  (*env)->ReleaseStringUTFChars(env, pathString, path);
+                  LocalReferenceHolder_Cleanup(&refs);
+              }
+              return s_TopExternalPath;
+          }
+
+          void SDL_AndroidCopyAssetFilesToDir(const char *destpath)
+          {
+              JNIEnv *env = Android_JNI_GetEnv();
+              jmethodID mid;
+              jstring jdest;
+              if (!env || !destpath) {
+                  return;
+              }
+              mid = (*env)->GetStaticMethodID(env, mActivityClass, "copyAssetFilesToDir", "(Ljava/lang/String;)V");
+              if (!mid) {
+                  (*env)->ExceptionClear(env);
+                  return;
+              }
+              jdest = (*env)->NewStringUTF(env, destpath);
+              (*env)->CallStaticVoidMethod(env, mActivityClass, mid, jdest);
+              (*env)->DeleteLocalRef(env, jdest);
+          }
+
+          '''
+          c.write_text(s.replace(marker, code + marker))
+          PYSDL
+          $NDK/ndk-build NDK_PROJECT_PATH=null APP_BUILD_SCRIPT=./Android.mk \
+            APP_PLATFORM=android-24 APP_ABI=armeabi-v7a \
+            NDK_OUT=$PWD/obj NDK_LIBS_OUT=$PWD/libs -j$(nproc) > sdl_build.log 2>&1 || {
+              echo "=== ERRORES SDL ==="; grep -n -E "error:|\*\*\*" sdl_build.log | head -30; tail -20 sdl_build.log; exit 1; }
+          cp libs/armeabi-v7a/libSDL2.so $W/lib/sdl2/android/armeabi-v7a/
+          ls -l $W/lib/*/android/armeabi-v7a/
+
+      - name: Parchear el codigo para 32 bits
+        run: |
+          set -e
+          # --- identidad de la app
+          sed -i "s|applicationId \"com.maniscat2.sm64coopdx\"|applicationId \"$APP_ID\"|" platform/app/build.gradle
+          sed -i "s|ANDROID_APPNAME \"com.maniscat2.sm64coopdx\"|ANDROID_APPNAME \"$APP_ID\"|" src/pc/platform.h
+          sed -i "s|<string name=\"app_name\">[^<]*</string>|<string name=\"app_name\">$APP_NAME</string>|" platform/app/src/main/res/values/strings.xml
+          grep -n "applicationId" platform/app/build.gradle
+          grep -n "ANDROID_APPNAME" src/pc/platform.h
+          grep -n "app_name" platform/app/src/main/res/values/strings.xml
+
+          # --- sustituto del verificador de actualizaciones (no usamos curl en 32 bits)
+          cat > platform/app/jni/update_checker_stub.c << 'EOF'
+          #include <stdbool.h>
+          bool gUpdateMessage = false;
+          void show_update_popup(void) {}
+          void check_for_updates(void) {}
+          EOF
+
+          # --- ABI y curl
+          python3 - << 'EOF'
+          import re, pathlib
+          p = pathlib.Path('Android.mk'); s = p.read_text()
+          s = s.replace('ifeq ($(TARGET_ARCH_ABI),arm64-v8a)', 'ifneq ($(filter arm64-v8a armeabi-v7a,$(TARGET_ARCH_ABI)),)')
+          s = re.sub(r'# Curl\ninclude \$\(CLEAR_VARS\)\nLOCAL_MODULE := curl\n.*?PREBUILT_SHARED_LIBRARY\)\n', '', s, flags=re.S)
+          s = s.replace('LOCAL_SHARED_LIBRARIES := sdl2 curl', 'LOCAL_SHARED_LIBRARIES := sdl2')
+          old = 'C_FILES := $(filter-out $(LOCAL_PATH)/src/game/main.c,$(C_FILES))'
+          new = 'C_FILES := $(filter-out $(LOCAL_PATH)/src/game/main.c $(LOCAL_PATH)/src/pc/update_checker.c,$(C_FILES))\nC_FILES += $(LOCAL_PATH)/platform/app/jni/update_checker_stub.c'
+          assert old in s
+          s = s.replace(old, new)
+          p.write_text(s)
+          for f, a, b in [('platform/app/jni/Application.mk', 'APP_ABI := arm64-v8a x86_64', 'APP_ABI := armeabi-v7a'),
+                          ('platform/app/build.gradle', "abiFilters 'arm64-v8a', 'x86_64'", "abiFilters 'armeabi-v7a'")]:
+              q = pathlib.Path(f); t = q.read_text(); assert a in t; q.write_text(t.replace(a, b))
+          EOF
+          sed -i '/^ *"curl",$/d' platform/app/src/main/java/org/libsdl/app/SDLActivity.java
+
+          # --- alineamiento de memoria a 8 bytes (necesario para las operaciones atomicas de 64 bits en ARM de 32 bits)
+          sed -i 's/, sizeof(void\*))/, 8)/' src/game/memory.c
+          grep -n "ALIGN_UP" src/game/memory.c
+
+          # --- el manejador de fallos del juego oculta los cierres en Android: se desactiva
+          python3 - << 'PYEOF'
+          import pathlib
+          p = pathlib.Path('src/pc/crash_handler.c'); t = p.read_text()
+          old = 'SetUnhandledExceptionFilter(crash_handler);\n#elif __linux__'
+          assert t.count(old) == 1
+          p.write_text(t.replace(old, 'SetUnhandledExceptionFilter(crash_handler);\n#elif __linux__ && !defined(TARGET_ANDROID)'))
+          PYEOF
+
+          # --- registro de fallos nativo (escribe crash_native.txt en la carpeta del juego)
+          sed -i 's|^C_FILES += \$(LOCAL_PATH)/platform/app/jni/update_checker_stub.c$|&\nC_FILES += $(LOCAL_PATH)/platform/app/jni/crash_log.c|' Android.mk
+          grep -n "crash_log" Android.mk
+          cat > platform/app/jni/crash_log.c << 'CRASHC'
+          #define _GNU_SOURCE
+          #include <signal.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <stdint.h>
+          #include <stdlib.h>
+          #include <unistd.h>
+          #include <fcntl.h>
+          #include <dlfcn.h>
+          #include <pthread.h>
+          #include <ucontext.h>
+          #include <sys/prctl.h>
+          #include <sys/syscall.h>
+
+          #define CL_DIR "/storage/emulated/0/com.maniscat2.sm64coopdx/"
+
+          typedef struct { uintptr_t lo, hi; } ClRange;
+          static ClRange sExec[768];
+          static int sExecCount = 0;
+          static char sMaps[300000];
+          static struct sigaction sOld[40];
+
+          static void cl_put(int fd, const char *s) { if (fd >= 0) { (void) !write(fd, s, strlen(s)); } }
+
+          static int cl_is_exec(uintptr_t a) {
+              for (int i = 0; i < sExecCount; i++) { if (a >= sExec[i].lo && a < sExec[i].hi) return 1; }
+              return 0;
+          }
+
+          static void cl_load_maps(void) {
+              int mf = open("/proc/self/maps", O_RDONLY);
+              if (mf < 0) return;
+              ssize_t total = 0, n;
+              while (total < (ssize_t) sizeof(sMaps) - 1 && (n = read(mf, sMaps + total, sizeof(sMaps) - 1 - total)) > 0) total += n;
+              close(mf);
+              sMaps[total] = 0;
+              char *line = sMaps;
+              while (*line && sExecCount < 768) {
+                  char *end = strchr(line, '\n');
+                  if (end) *end = 0;
+                  char *p;
+                  uintptr_t lo = strtoul(line, &p, 16);
+                  if (*p == '-') {
+                      uintptr_t hi = strtoul(p + 1, &p, 16);
+                      while (*p == ' ') p++;
+                      if (p[0] == 'r' && p[2] == 'x') { sExec[sExecCount].lo = lo; sExec[sExecCount].hi = hi; sExecCount++; }
+                  }
+                  if (!end) break;
+                  line = end + 1;
+              }
+          }
+
+          static void cl_addr(int fd, const char *label, uintptr_t a) {
+              Dl_info di; char b[600];
+              if (dladdr((void *) a, &di) && di.dli_fname) {
+                  const char *f = strrchr(di.dli_fname, '/'); f = f ? f + 1 : di.dli_fname;
+                  snprintf(b, sizeof b, "%s %08lx %s!%s+%lx [off %lx]\n", label, (unsigned long) a, f,
+                      di.dli_sname ? di.dli_sname : "?",
+                      di.dli_sname ? (unsigned long) (a - (uintptr_t) di.dli_saddr) : 0UL,
+                      (unsigned long) (a - (uintptr_t) di.dli_fbase));
+              } else {
+                  snprintf(b, sizeof b, "%s %08lx (sin simbolo)\n", label, (unsigned long) a);
+              }
+              cl_put(fd, b);
+          }
+
+          static void cl_handler(int sig, siginfo_t *si, void *ctx) {
+              char b[300]; char name[32] = {0};
+              int fd = open(CL_DIR "crash_native.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+              if (fd < 0) fd = open("/sdcard/crash_native.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+              prctl(PR_GET_NAME, (unsigned long) name, 0, 0, 0);
+              snprintf(b, sizeof b, "SENAL %d code %d fault_addr %08lx pid %d tid %d hilo '%s'\n", sig, si->si_code,
+                  (unsigned long) si->si_addr, (int) getpid(), (int) syscall(__NR_gettid), name);
+              cl_put(fd, b);
+          #if defined(__arm__)
+              ucontext_t *uc = (ucontext_t *) ctx;
+              unsigned long *r = &uc->uc_mcontext.arm_r0;
+              cl_load_maps();
+              for (int i = 0; i < 16; i++) {
+                  snprintf(b, sizeof b, "r%d=%08lx%s", i, r[i], (i % 4 == 3) ? "\n" : " ");
+                  cl_put(fd, b);
+              }
+              cl_addr(fd, "PC", uc->uc_mcontext.arm_pc);
+              cl_addr(fd, "LR", uc->uc_mcontext.arm_lr);
+              cl_put(fd, "--- pila (candidatos) ---\n");
+              uintptr_t top = 0; pthread_attr_t at; void *sa; size_t ss;
+              if (pthread_getattr_np(pthread_self(), &at) == 0) { pthread_attr_getstack(&at, &sa, &ss); top = (uintptr_t) sa + ss; }
+              uintptr_t *sp = (uintptr_t *) uc->uc_mcontext.arm_sp;
+              int shown = 0;
+              for (int i = 0; top && (uintptr_t) (sp + i) < top && i < 6000 && shown < 70; i++) {
+                  uintptr_t w = sp[i];
+                  if (cl_is_exec(w)) { snprintf(b, sizeof b, "#%d", shown); cl_addr(fd, b, w); shown++; }
+              }
+          #endif
+              if (fd >= 0) close(fd);
+              sigaction(sig, &sOld[sig], NULL);
+              if (sig == SIGABRT) raise(sig);
+          }
+
+          __attribute__((constructor)) static void cl_init(void) {
+              int lf = open(CL_DIR "game_log.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+              if (lf >= 0) {
+                  dup2(lf, 1); dup2(lf, 2); close(lf);
+                  setvbuf(stdout, NULL, _IOLBF, 0);
+                  setvbuf(stderr, NULL, _IONBF, 0);
+              }
+              struct sigaction sa;
+              memset(&sa, 0, sizeof sa);
+              sa.sa_sigaction = cl_handler;
+              sigemptyset(&sa.sa_mask);
+              sa.sa_flags = SA_SIGINFO;
+              int sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP };
+              for (int i = 0; i < 6; i++) { sigaction(sigs[i], &sa, &sOld[sigs[i]]); }
+          }
+          CRASHC
+          cat > platform/app/src/main/java/com/maniscat2/sm64coopdx/sm64coopdxActivity.java << 'JAVAEOF'
+          package com.maniscat2.sm64coopdx;
+
+          import android.os.Bundle;
+          import org.libsdl.app.SDLActivity;
+          import java.io.FileOutputStream;
+          import java.io.PrintWriter;
+          import java.io.StringWriter;
+
+          public class sm64coopdxActivity extends SDLActivity
+          {
+              private static final String DIR = "/storage/emulated/0/com.maniscat2.sm64coopdx/";
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  final Thread.UncaughtExceptionHandler prev = Thread.getDefaultUncaughtExceptionHandler();
+                  Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+                      public void uncaughtException(Thread t, Throwable e) {
+                          try {
+                              StringWriter sw = new StringWriter();
+                              e.printStackTrace(new PrintWriter(sw));
+                              FileOutputStream o = new FileOutputStream(DIR + "crash_java.txt");
+                              o.write(sw.toString().getBytes());
+                              o.close();
+                          } catch (Throwable ignored) { }
+                          if (prev != null) prev.uncaughtException(t, e);
+                      }
+                  });
+                  super.onCreate(savedInstanceState);
+              }
+          }
+          JAVAEOF
+          # la carpeta de datos de los registros sigue al identificador de la app
+          sed -i "s|/storage/emulated/0/com.maniscat2.sm64coopdx/|/storage/emulated/0/$APP_ID/|" platform/app/jni/crash_log.c platform/app/src/main/java/com/maniscat2/sm64coopdx/sm64coopdxActivity.java
+          grep -n "storage/emulated" platform/app/jni/crash_log.c platform/app/src/main/java/com/maniscat2/sm64coopdx/sm64coopdxActivity.java
+          git diff --stat
+
+      - name: Make del host (genera archivos del juego)
+        run: |
+          make -j$(nproc) TOUCH_CONTROLS=1 > make.log 2>&1 || {
+            echo "=== ERRORES ==="; grep -n -E "error|\*\*\*" make.log | head -30
+            echo "=== FINAL ==="; tail -20 make.log; exit 1; }
+
+      - name: Convertir datos de sonido a 32 bits
+        run: |
+          SD=$(dirname $(find build -name sound_data.ctl | head -1))
+          echo "Carpeta de sonido: $SD"
+          python3 tools/convert_sound_32.py "$SD"
+
+      - name: Gradle (APK de 32 bits)
+        run: |
+          chmod +x platform/gradlew
+          ./platform/gradlew assembleRelease > gradle.log 2>&1 || {
+            echo "=== ERRORES ==="; grep -n -E "error:|undefined|FAILED|What went wrong|Execution failed" gradle.log | head -40
+            echo "=== FINAL ==="; tail -30 gradle.log; exit 1; }
+          ls -l platform/app/build/outputs/apk/release/
+          unzip -l platform/app/build/outputs/apk/release/app-release-unsigned.apk | grep -E "lib/" || true
+
+      - name: Firmar APK con tu clave
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          set -e
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "Faltan secretos del repositorio: KEYSTORE_B64, KEY_ALIAS y KEYSTORE_PASSWORD."
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > $RUNNER_TEMP/release.jks
+          TAG=${GITHUB_REF_NAME:-manual}
+          mkdir -p out
+          OUT=out/sm64coopdx-armv7-${TAG//\//-}.apk
+          apksigner sign --ks $RUNNER_TEMP/release.jks --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KEYSTORE_PASSWORD --out "$OUT" \
+            platform/app/build/outputs/apk/release/app-release-unsigned.apk
+          apksigner verify --print-certs "$OUT" | head -3
+          (cd out && sha256sum "$(basename $OUT)" > "$(basename $OUT).sha256" && cat "$(basename $OUT).sha256")
+          rm -f $RUNNER_TEMP/release.jks
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sm64coopdx-armv7
+          path: out/*
+
+      - name: Publicar pre-release en GitHub
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$GITHUB_REF_NAME
+          if [ -f RELEASE_NOTES.md ]; then NOTES="--notes-file RELEASE_NOTES.md"; else NOTES="--generate-notes"; fi
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber
+          else
+            gh release create "$TAG" out/* --prerelease --title "$TAG" $NOTES
+          fi
