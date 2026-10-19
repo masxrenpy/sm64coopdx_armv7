@@ -10,6 +10,10 @@ on:
         description: 'Compilar en modo ARM (no Thumb)'
         type: boolean
         default: false
+      diagnostico:
+        description: 'APK de diagnostico (perfilador). SOLO para pruebas locales: no usar online ni publicar'
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -390,6 +394,12 @@ jobs:
           if [ "${{ inputs.neon }}" = "true" ]; then sed -i '/^LOCAL_CFLAGS := /a LOCAL_ARM_NEON := true' Android.mk; fi
           if [ "${{ inputs.modo_arm }}" = "true" ]; then sed -i '/^LOCAL_CFLAGS := /a LOCAL_ARM_MODE := arm' Android.mk; fi
           grep -n "LOCAL_ARM" Android.mk || echo "sin variantes"
+
+      - name: Variante de diagnostico (perfilador)
+        if: ${{ inputs.diagnostico }}
+        run: |
+          sed -i 's/^LOCAL_CFLAGS := /LOCAL_CFLAGS := -DDEVELOPMENT /' Android.mk
+          grep -n "^LOCAL_CFLAGS := -DDEVELOPMENT" Android.mk | cut -c1-60
 
       
       - name: Gradle (APK de 32 bits)
