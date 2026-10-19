@@ -339,6 +339,40 @@ jobs:
           grep -n "ALIGN_UP" src/game/memory.c
           git diff --stat
 
+      
+      - name: Parche del joystick tactil
+        run: |
+          python3 - << 'PYJOY'
+          import pathlib
+          p = pathlib.Path('src/pc/controller/controller_touchscreen.c'); t = p.read_text()
+
+          old1 = ("            size = configControlElements[i].size * 100;\n"
+                  "            if (!TRIGGER_DETECT(size)) continue;\n")
+          new1 = ("            size = configControlElements[i].size * 100;\n"
+                  "            // la base del joystick se dibuja ~2.5 veces mas grande que su zona tactil original\n"
+                  "            s32 hitSize = (controlElements[i].type == Joystick) ? size * 2 : size;\n"
+                  "            if (!TRIGGER_DETECT(hitSize)) continue;\n")
+          assert t.count(old1) == 1
+          t = t.replace(old1, new1)
+
+          old2 = ("                        controlElements[i].joyX = CORRECT_TOUCH_X(event->x) - pos.x;\n"
+                  "                        controlElements[i].joyY = CORRECT_TOUCH_Y(event->y) - pos.y;\n")
+          new2 = ("                        controlElements[i].joyX = touch_clamp(CORRECT_TOUCH_X(event->x) - pos.x, -size / 2, size / 2);\n"
+                  "                        controlElements[i].joyY = touch_clamp(CORRECT_TOUCH_Y(event->y) - pos.y, -size / 2, size / 2);\n")
+          assert t.count(old2) == 1
+          t = t.replace(old2, new2)
+
+          old3 = "void touch_down(struct TouchEvent* event) {\n"
+          new3 = ("static s32 touch_clamp(s32 v, s32 lo, s32 hi) {\n"
+                  "    return (v < lo) ? lo : ((v > hi) ? hi : v);\n"
+                  "}\n\n" + old3)
+          assert t.count(old3) == 1
+          t = t.replace(old3, new3)
+          p.write_text(t)
+          PYJOY
+          git diff --stat src/pc/controller/controller_touchscreen.c
+
+          
       - name: Make del host (genera archivos del juego)
         run: |
           make -j$(nproc) TOUCH_CONTROLS=1 > make.log 2>&1 || {
