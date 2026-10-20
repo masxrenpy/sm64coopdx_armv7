@@ -401,6 +401,38 @@ jobs:
           sed -i 's/^LOCAL_CFLAGS := /LOCAL_CFLAGS := -DDEVELOPMENT /' Android.mk
           grep -n "^LOCAL_CFLAGS := -DDEVELOPMENT" Android.mk | cut -c1-60
 
+      - name: Contadores extra de render (diagnostico)
+        if: ${{ inputs.diagnostico }}
+        run: |
+          python3 - << 'PYEOF'
+          import pathlib
+
+          h = pathlib.Path('src/pc/debug_context.h'); t = h.read_text()
+          old = '    CTX_LIGHTING,\n    CTX_MAX,\n'
+          assert t.count(old) == 1
+          h.write_text(t.replace(old, '    CTX_LIGHTING,\n    CTX_GFX_RUN,\n    CTX_GFX_SWAP,\n    CTX_MAX,\n'))
+
+          c = pathlib.Path('src/pc/djui/djui_ctx_display.c'); t = c.read_text()
+          old = '    "LIGHTING",\n    "OTHER",\n'
+          assert t.count(old) == 1
+          c.write_text(t.replace(old, '    "LIGHTING",\n    "GFXRUN",\n    "SWAP",\n    "OTHER",\n'))
+
+          m = pathlib.Path('src/pc/pc_main.c'); t = m.read_text()
+          old = ('        send_display_list(gGfxSPTask);\n'
+                 '        gfx_end_frame_render();\n'
+                 '        gfx_display_frame();\n')
+          new = ('        CTX_BEGIN(CTX_GFX_RUN);\n'
+                 '        send_display_list(gGfxSPTask);\n'
+                 '        CTX_END(CTX_GFX_RUN);\n'
+                 '        CTX_BEGIN(CTX_GFX_SWAP);\n'
+                 '        gfx_end_frame_render();\n'
+                 '        gfx_display_frame();\n'
+                 '        CTX_END(CTX_GFX_SWAP);\n')
+          assert t.count(old) == 1
+          m.write_text(t.replace(old, new))
+          PYEOF
+          git diff --stat
+
       
       - name: Gradle (APK de 32 bits)
         run: |
