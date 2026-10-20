@@ -15,6 +15,12 @@ on:
         type: boolean
         default: false
 
+      perflog:
+        description: 'Registro de rendimiento en game_log.txt (sin pantalla de perfilador)'
+        type: boolean
+        default: false
+
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -375,6 +381,70 @@ jobs:
           p.write_text(t)
           PYJOY
           git diff --stat src/pc/controller/controller_touchscreen.c
+
+      - name: Registro de rendimiento (perflog)
+        if: ${{ inputs.perflog }}
+        run: |
+          python3 - << 'PYEOF'
+          import pathlib
+
+          def patch(path, old, new):
+              p = pathlib.Path(path); t = p.read_text()
+              assert t.count(old) == 1, (path, old[:50])
+              p.write_text(t.replace(old, new))
+
+          patch('src/pc/gfx/gfx_pc.c',
+                'static void gfx_flush(void) {\n    if (buf_vbo_len > 0) {\n        gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);\n',
+                'f64 clock_elapsed_f64(void);\nf64 gDbgFlushTime = 0;\nu32 gDbgDraws = 0;\nu32 gDbgTris = 0;\n\n'
+                'static void gfx_flush(void) {\n    if (buf_vbo_len > 0) {\n        gDbgDraws++;\n        gDbgTris += (u32) buf_vbo_num_tris;\n'
+                '        f64 flushT0 = clock_elapsed_f64();\n'
+                '        gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);\n'
+                '        gDbgFlushTime += clock_elapsed_f64() - flushT0;\n')
+
+          patch('src/pc/pc_main.c',
+                '#include "pc/utils/misc.h"\n',
+                '#include "pc/utils/misc.h"\n\n'
+                'extern f64 gDbgFlushTime;\nextern u32 gDbgDraws;\nextern u32 gDbgTris;\n'
+                'static f64 sPerfStart = 0, sPerfRun = 0, sPerfSwap = 0, sPerfGame = 0;\n'
+                'static u32 sPerfFrames = 0, sPerfTicks = 0;\n')
+
+          patch('src/pc/pc_main.c',
+                '        send_display_list(gGfxSPTask);\n        gfx_end_frame_render();\n        gfx_display_frame();\n',
+                '        f64 perfT0 = clock_elapsed_f64();\n'
+                '        send_display_list(gGfxSPTask);\n'
+                '        f64 perfT1 = clock_elapsed_f64();\n'
+                '        gfx_end_frame_render();\n        gfx_display_frame();\n'
+                '        f64 perfT2 = clock_elapsed_f64();\n'
+                '        sPerfFrames++;\n        sPerfRun += perfT1 - perfT0;\n        sPerfSwap += perfT2 - perfT1;\n')
+
+          patch('src/pc/pc_main.c',
+                '    CTX_EXTENT(CTX_GAME_LOOP, game_loop_one_iteration);\n',
+                '    f64 perfG0 = clock_elapsed_f64();\n'
+                '    CTX_EXTENT(CTX_GAME_LOOP, game_loop_one_iteration);\n'
+                '    sPerfGame += clock_elapsed_f64() - perfG0;\n'
+                '    sPerfTicks++;\n')
+
+          patch('src/pc/pc_main.c',
+                '    // compute and update the frame rate every second\n',
+                '    {\n'
+                '        f64 perfNow = clock_elapsed_f64();\n'
+                '        if (sPerfStart == 0) {\n'
+                '            sPerfStart = perfNow;\n'
+                '        } else if (perfNow - sPerfStart >= 1.0 && sPerfFrames > 0 && sPerfTicks > 0) {\n'
+                '            printf("PERF %.1fs frames=%u ticks=%u | por fotograma: gfxrun=%.2fms flush=%.2fms swap=%.2fms draws=%.0f tris=%.0f | por tick: game=%.2fms\\n",\n'
+                '                perfNow - sPerfStart, sPerfFrames, sPerfTicks,\n'
+                '                sPerfRun * 1000.0 / sPerfFrames, gDbgFlushTime * 1000.0 / sPerfFrames, sPerfSwap * 1000.0 / sPerfFrames,\n'
+                '                (f64) gDbgDraws / sPerfFrames, (f64) gDbgTris / sPerfFrames, sPerfGame * 1000.0 / sPerfTicks);\n'
+                '            fflush(stdout);\n'
+                '            sPerfStart = perfNow;\n'
+                '            sPerfRun = 0; sPerfSwap = 0; sPerfGame = 0;\n'
+                '            sPerfFrames = 0; sPerfTicks = 0;\n'
+                '            gDbgFlushTime = 0; gDbgDraws = 0; gDbgTris = 0;\n'
+                '        }\n'
+                '    }\n\n'
+                '    // compute and update the frame rate every second\n')
+          PYEOF
+          git diff --stat
 
           
       - name: Make del host (genera archivos del juego)
