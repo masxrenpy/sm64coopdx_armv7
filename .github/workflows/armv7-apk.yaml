@@ -407,29 +407,37 @@ jobs:
           python3 - << 'PYEOF'
           import pathlib
 
-          h = pathlib.Path('src/pc/debug_context.h'); t = h.read_text()
-          old = '    CTX_LIGHTING,\n    CTX_MAX,\n'
-          assert t.count(old) == 1
-          h.write_text(t.replace(old, '    CTX_LIGHTING,\n    CTX_GFX_RUN,\n    CTX_GFX_SWAP,\n    CTX_MAX,\n'))
+          def patch(path, old, new):
+              p = pathlib.Path(path); t = p.read_text()
+              assert t.count(old) == 1, (path, old[:40])
+              p.write_text(t.replace(old, new))
 
-          c = pathlib.Path('src/pc/djui/djui_ctx_display.c'); t = c.read_text()
-          old = '    "LIGHTING",\n    "OTHER",\n'
-          assert t.count(old) == 1
-          c.write_text(t.replace(old, '    "LIGHTING",\n    "GFXRUN",\n    "SWAP",\n    "OTHER",\n'))
-
-          m = pathlib.Path('src/pc/pc_main.c'); t = m.read_text()
-          old = ('        send_display_list(gGfxSPTask);\n'
-                 '        gfx_end_frame_render();\n'
-                 '        gfx_display_frame();\n')
-          new = ('        CTX_BEGIN(CTX_GFX_RUN);\n'
-                 '        send_display_list(gGfxSPTask);\n'
-                 '        CTX_END(CTX_GFX_RUN);\n'
-                 '        CTX_BEGIN(CTX_GFX_SWAP);\n'
-                 '        gfx_end_frame_render();\n'
-                 '        gfx_display_frame();\n'
-                 '        CTX_END(CTX_GFX_SWAP);\n')
-          assert t.count(old) == 1
-          m.write_text(t.replace(old, new))
+          patch('src/pc/debug_context.h',
+                '    CTX_LIGHTING,\n    CTX_MAX,\n',
+                '    CTX_LIGHTING,\n    CTX_GFX_RUN,\n    CTX_GFX_SWAP,\n    CTX_GFX_FLUSH,\n    CTX_N_DRAWS,\n    CTX_N_TRIS,\n    CTX_MAX,\n')
+          patch('src/pc/djui/djui_ctx_display.c',
+                '    "LIGHTING",\n    "OTHER",\n',
+                '    "LIGHTING",\n    "GFXRUN",\n    "SWAP",\n    "GFXFLUSH",\n    "NDRAWS",\n    "NTRIS",\n    "OTHER",\n')
+          patch('src/pc/pc_main.c',
+                '        send_display_list(gGfxSPTask);\n        gfx_end_frame_render();\n        gfx_display_frame();\n',
+                '        CTX_BEGIN(CTX_GFX_RUN);\n        send_display_list(gGfxSPTask);\n        CTX_END(CTX_GFX_RUN);\n'
+                '        CTX_BEGIN(CTX_GFX_SWAP);\n        gfx_end_frame_render();\n        gfx_display_frame();\n        CTX_END(CTX_GFX_SWAP);\n')
+          patch('src/pc/gfx/gfx_pc.c',
+                'static void gfx_flush(void) {\n    if (buf_vbo_len > 0) {\n        gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);\n',
+                'static u32 sDbgDraws = 0;\nstatic u32 sDbgTris = 0;\n\n'
+                'static void gfx_flush(void) {\n    if (buf_vbo_len > 0) {\n        sDbgDraws++;\n        sDbgTris += (u32) buf_vbo_num_tris;\n'
+                '        CTX_BEGIN(CTX_GFX_FLUSH);\n        gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);\n        CTX_END(CTX_GFX_FLUSH);\n')
+          patch('src/pc/gfx/gfx_pc.c',
+                '    gfx_rapi->start_frame();\n    gfx_run_dl(commands);\n}\n',
+                '    gfx_rapi->start_frame();\n    gfx_run_dl(commands);\n'
+                '    debug_context_set_time(CTX_N_DRAWS, (sDbgDraws + 0.5) * 1e-6);\n'
+                '    debug_context_set_time(CTX_N_TRIS, (sDbgTris + 0.5) * 1e-6);\n'
+                '    sDbgDraws = 0;\n    sDbgTris = 0;\n}\n')
+          patch('src/pc/djui/djui_ctx_display.c',
+                '        s32 counterMs = (s32)(debug_context_get_time(i) * 1000000.0);\n',
+                '        static f64 sSmooth[CTX_MAX] = { 0 };\n'
+                '        sSmooth[i] = sSmooth[i] * 0.95 + debug_context_get_time(i) * 0.05;\n'
+                '        s32 counterMs = (s32)(sSmooth[i] * 1000000.0);\n')
           PYEOF
           git diff --stat
 
