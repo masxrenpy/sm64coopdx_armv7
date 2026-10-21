@@ -377,7 +377,7 @@ jobs:
                   "            if (!TRIGGER_DETECT(size)) continue;\n")
           new1 = ("            size = configControlElements[i].size * 100;\n"
                   "            // la base del joystick se dibuja ~2.5 veces mas grande que su zona tactil original\n"
-                  "            s32 hitSize = (controlElements[i].type == Joystick) ? size * 2 : size;\n"
+                  "            s32 hitSize = (controlElements[i].type == Joystick) ? size * 2.5 : size;\n"
                   "            if (!TRIGGER_DETECT(hitSize)) continue;\n")
           assert t.count(old1) == 1
           t = t.replace(old1, new1)
