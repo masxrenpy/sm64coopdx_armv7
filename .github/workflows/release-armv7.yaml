@@ -399,6 +399,97 @@ jobs:
           PYJOY
           git diff --stat src/pc/controller/controller_touchscreen.c
 
+      - name: Optimizacion - subida de vertices con buffer persistente
+        run: |
+          python3 - << 'PYEOF'
+          import os, pathlib
+
+          def patch(path, old, new):
+              p = pathlib.Path(path); t = p.read_text()
+              assert t.count(old) == 1, (path, old[:50])
+              p.write_text(t.replace(old, new))
+
+          F = 'src/pc/gfx/gfx_opengl.c'
+          APP = os.environ.get('APP_ID', 'com.maniscat2.sm64coopdx')
+
+          patch(F, '#include <stdint.h>\n#include <stdbool.h>\n',
+                   '#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <string.h>\n')
+
+          patch(F, 'static void gfx_opengl_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {\n'
+                   '    //printf("flushing %d tris\\n", buf_vbo_num_tris);\n'
+                   '    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * buf_vbo_len, buf_vbo, GL_STREAM_DRAW);\n'
+                   '    glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris);\n}\n',
+                   '// Subida de vertices con un buffer en anillo de memoria mapeada persistente (GL_EXT_buffer_storage).\n'
+                   '// Evita reservar un buffer nuevo (glBufferData) en cada llamada de dibujo, lo que en algunos\n'
+                   '// controladores moviles (p. ej. PowerVR) es muy caro. Si la extension no esta disponible, o si existe\n'
+                   '// el archivo legacy_upload.txt en la carpeta del juego, se usa el metodo clasico.\n'
+                   '#define RING_SIZE (8 * 1024 * 1024)\n'
+                   'typedef void (*GfxBufferStorageFn)(GLenum, GLsizeiptr, const void *, GLbitfield);\n'
+                   'static bool sRingInitTried = false;\n'
+                   'static GLuint sRingVbo = 0;\n'
+                   'static uint8_t *sRingPtr = NULL;\n'
+                   'static size_t sRingOffset = 0;\n\n'
+                   'static void gfx_opengl_ring_init(void) {\n'
+                   '    sRingInitTried = true;\n'
+                   '    FILE *f = fopen("/storage/emulated/0/' + APP + '/legacy_upload.txt", "r");\n'
+                   '    if (f != NULL) {\n'
+                   '        fclose(f);\n'
+                   '        printf("UPLOAD clasico (forzado por legacy_upload.txt)\\n");\n'
+                   '        fflush(stdout);\n'
+                   '        return;\n'
+                   '    }\n'
+                   '    const char *ext = (const char *) glGetString(GL_EXTENSIONS);\n'
+                   '    GfxBufferStorageFn storage = NULL;\n'
+                   '    if (ext != NULL && strstr(ext, "GL_EXT_buffer_storage") != NULL) {\n'
+                   '        storage = (GfxBufferStorageFn) SDL_GL_GetProcAddress("glBufferStorageEXT");\n'
+                   '    }\n'
+                   '    if (storage == NULL) {\n'
+                   '        printf("UPLOAD clasico (GL_EXT_buffer_storage no disponible)\\n");\n'
+                   '        fflush(stdout);\n'
+                   '        return;\n'
+                   '    }\n'
+                   '    GLuint vbo = 0;\n'
+                   '    glGenBuffers(1, &vbo);\n'
+                   '    glBindBuffer(GL_ARRAY_BUFFER, vbo);\n'
+                   '    storage(GL_ARRAY_BUFFER, RING_SIZE, NULL, 0x0002 | 0x0040 | 0x0080);\n'
+                   '    uint8_t *ptr = (uint8_t *) glMapBufferRange(GL_ARRAY_BUFFER, 0, RING_SIZE, 0x0002 | 0x0040 | 0x0080);\n'
+                   '    if (ptr == NULL) {\n'
+                   '        glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);\n'
+                   '        glDeleteBuffers(1, &vbo);\n'
+                   '        printf("UPLOAD clasico (no se pudo mapear el buffer persistente)\\n");\n'
+                   '        fflush(stdout);\n'
+                   '        return;\n'
+                   '    }\n'
+                   '    sRingVbo = vbo;\n'
+                   '    sRingPtr = ptr;\n'
+                   '    sRingOffset = 0;\n'
+                   '    if (opengl_prg != NULL) { gfx_opengl_vertex_array_set_attribs(opengl_prg); }\n'
+                   '    printf("UPLOAD persistente activo (anillo de %d MB)\\n", RING_SIZE / (1024 * 1024));\n'
+                   '    fflush(stdout);\n'
+                   '}\n\n'
+                   'static void gfx_opengl_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {\n'
+                   '    if (!sRingInitTried) { gfx_opengl_ring_init(); }\n'
+                   '    if (sRingPtr == NULL) {\n'
+                   '        glBufferData(GL_ARRAY_BUFFER, sizeof(float) * buf_vbo_len, buf_vbo, GL_STREAM_DRAW);\n'
+                   '        glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris);\n'
+                   '        return;\n'
+                   '    }\n'
+                   '    size_t bytes = sizeof(float) * buf_vbo_len;\n'
+                   '    size_t verts = 3 * buf_vbo_num_tris;\n'
+                   '    size_t stride = bytes / verts;\n'
+                   '    size_t off = ((sRingOffset + stride - 1) / stride) * stride;\n'
+                   '    if (off + bytes > RING_SIZE) { off = 0; }\n'
+                   '    memcpy(sRingPtr + off, buf_vbo, bytes);\n'
+                   '    glDrawArrays(GL_TRIANGLES, off / stride, verts);\n'
+                   '    sRingOffset = off + bytes;\n'
+                   '}\n')
+
+          patch(F, '    glGenBuffers(1, &opengl_vbo);\n\n    glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);\n',
+                   '    sRingInitTried = false;\n    sRingVbo = 0;\n    sRingPtr = NULL;\n    sRingOffset = 0;\n\n'
+                   '    glGenBuffers(1, &opengl_vbo);\n\n    glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);\n')
+          PYEOF
+          git diff --stat src/pc/gfx/gfx_opengl.c
+
       - name: Make del host (genera archivos del juego)
         run: |
           make -j$(nproc) TOUCH_CONTROLS=1 > make.log 2>&1 || {
