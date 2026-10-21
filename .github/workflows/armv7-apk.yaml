@@ -20,6 +20,60 @@ on:
         type: boolean
         default: false
 
+      - name: Modos de prueba del dibujo (perflog)
+        if: ${{ inputs.perflog }}
+        run: |
+          python3 - << 'PYEOF'
+          import pathlib
+
+          def patch(path, old, new):
+              p = pathlib.Path(path); t = p.read_text()
+              assert t.count(old) == 1, (path, old[:50])
+              p.write_text(t.replace(old, new))
+
+          F = 'src/pc/gfx/gfx_opengl.c'
+
+          patch(F, '#include <stdint.h>\n#include <stdbool.h>\n',
+                   '#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n')
+
+          patch(F, 'static void gfx_opengl_set_viewport(int x, int y, int width, int height) {\n    glViewport(x, y, width, height);\n}\n',
+                   'static int sVpX, sVpY, sVpW, sVpH;\n\n'
+                   'static void gfx_opengl_set_viewport(int x, int y, int width, int height) {\n'
+                   '    sVpX = x; sVpY = y; sVpW = width; sVpH = height;\n'
+                   '    glViewport(x, y, width, height);\n}\n')
+
+          patch(F, 'static void gfx_opengl_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {\n'
+                   '    //printf("flushing %d tris\\n", buf_vbo_num_tris);\n'
+                   '    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * buf_vbo_len, buf_vbo, GL_STREAM_DRAW);\n'
+                   '    glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris);\n}\n',
+                   'static int sPerfMode = -1;\n\n'
+                   'static void gfx_opengl_perf_mode_load(void) {\n'
+                   '    sPerfMode = 0;\n'
+                   '    FILE *f = fopen("/storage/emulated/0/com.maniscat2.sm64coopdx/perf_mode.txt", "r");\n'
+                   '    if (f) {\n'
+                   '        int m = 0;\n'
+                   '        if (fscanf(f, "%d", &m) == 1) { sPerfMode = m; }\n'
+                   '        fclose(f);\n'
+                   '    }\n'
+                   '    printf("PERFMODE %d (0 normal, 1 sin glDrawArrays, 2 sin llamadas GL de dibujo, 3 viewport 1x1)\\n", sPerfMode);\n'
+                   '    fflush(stdout);\n'
+                   '}\n\n'
+                   'static void gfx_opengl_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {\n'
+                   '    if (sPerfMode < 0) { gfx_opengl_perf_mode_load(); }\n'
+                   '    if (sPerfMode == 2) { return; }\n'
+                   '    if (sPerfMode == 3) { glViewport(0, 0, 1, 1); }\n'
+                   '    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * buf_vbo_len, buf_vbo, GL_STREAM_DRAW);\n'
+                   '    if (sPerfMode != 1) { glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris); }\n'
+                   '    if (sPerfMode == 3) { glViewport(sVpX, sVpY, sVpW, sVpH); }\n}\n')
+
+          patch(F, '    glGenBuffers(1, &opengl_vbo);\n\n    glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);\n',
+                   '    printf("GLINFO vendor=%s renderer=%s version=%s\\n", (const char *) glGetString(GL_VENDOR), (const char *) glGetString(GL_RENDERER), (const char *) glGetString(GL_VERSION));\n'
+                   '    printf("GLEXT %s\\n", (const char *) glGetString(GL_EXTENSIONS));\n'
+                   '    fflush(stdout);\n\n'
+                   '    glGenBuffers(1, &opengl_vbo);\n\n    glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);\n')
+          PYEOF
+          git diff --stat src/pc/gfx/gfx_opengl.c
+
 
 jobs:
   build:
