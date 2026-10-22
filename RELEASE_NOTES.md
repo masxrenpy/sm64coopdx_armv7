@@ -17,7 +17,7 @@ What's new
 - **Draw distance:** new installs default to 3x (was Infinite). If you are updating, your saved setting is kept; change it in Options → Display → Draw Distance.
 - CoopNet fix from beta 1 stays (32-bit clients can join public lobbies).
 
-If you see graphical glitches (flicker, broken geometry): create an empty file named `legacy_upload.txt` in the game folder (`/storage/emulated/0/<application id>/`), restart the game, and tell us your device model and GPU.
+If you see graphical glitches (flicker, broken geometry): create an empty file named `legacy_upload.txt` in the game folder (`/storage/emulated/0/com.maniscat2.sm64coopdx32bits/`), restart the game, and tell us your device model and GPU.
 
 Verify the download with the `.sha256` file. Still tested on a limited set of devices.
 
