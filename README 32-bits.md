@@ -22,9 +22,13 @@ is 32-bit only (many low-end phones are, even with a 64-bit CPU).
 Tested against the official 1.5.1 client over CoopNet and direct connection. Versions must match.
 
 ## Known limitations
-- Tested on a single device (Redmi 9A, Android 10): about 45–50 FPS in general, with dips when loading and in water levels.
+- Tested on few devices (Redmi 9A, Android 10, PowerVR GE8320): typically 45–60 FPS, with a short dip when entering a world.
 - The built-in update checker is disabled.
-- This is a beta: Errors, frame drops, and unresponsive controls may occur.
+- This is a beta: expect bugs.
+
+## Troubleshooting
+- **Graphical glitches (flicker, broken geometry):** create an empty `legacy_upload.txt` in the game folder and restart. Please report your device and GPU in an issue.
+- **Game closes:** attach `crash_native.txt` from the game folder when opening an issue.
 
 ## Reporting bugs
 Open an issue with your device model, Android version and what happened. If the game closes, attach
