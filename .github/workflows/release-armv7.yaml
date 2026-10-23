@@ -367,6 +367,46 @@ jobs:
           grep -n "storage/emulated" platform/app/jni/crash_log.c platform/app/src/main/java/com/maniscat2/sm64coopdx/sm64coopdxActivity.java
           git diff --stat
 
+      - name: Registro de fallos - datos de memoria
+        run: |
+          python3 - << 'PYEOF'
+          import pathlib
+          p = pathlib.Path('platform/app/jni/crash_log.c'); t = p.read_text()
+          a1 = 'static void cl_handler(int sig, siginfo_t *si, void *ctx) {\n'
+          a2 = '    cl_put(fd, b);\n#if defined(__arm__)\n'
+          assert t.count(a1) == 1 and t.count(a2) == 1
+          dump = '''static void cl_dump_proc(int fd) {
+              static char buf[4096];
+              const char *files[2] = { "/proc/self/status", "/proc/meminfo" };
+              const char *keys[2] = { "Vm", "Mem" };
+              for (int k = 0; k < 2; k++) {
+                  int pf = open(files[k], O_RDONLY);
+                  if (pf < 0) continue;
+                  ssize_t n = read(pf, buf, sizeof(buf) - 1);
+                  close(pf);
+                  if (n <= 0) continue;
+                  buf[n] = 0;
+                  cl_put(fd, k == 0 ? "--- memoria del proceso ---\\n" : "--- memoria del sistema ---\\n");
+                  char *line = buf;
+                  while (*line) {
+                      char *end = strchr(line, '\\n');
+                      if (end) *end = 0;
+                      if (strncmp(line, keys[k], strlen(keys[k])) == 0 || (k == 0 && strncmp(line, "Threads", 7) == 0)) {
+                          cl_put(fd, line);
+                          cl_put(fd, "\\n");
+                      }
+                      if (!end) break;
+                      line = end + 1;
+                  }
+              }
+          }
+
+          '''
+          t = t.replace(a1, dump + a1)
+          t = t.replace(a2, '    cl_put(fd, b);\n    cl_dump_proc(fd);\n#if defined(__arm__)\n')
+          p.write_text(t)
+          PYEOF
+
       - name: Parche del joystick tactil
         run: |
           python3 - << 'PYJOY'
