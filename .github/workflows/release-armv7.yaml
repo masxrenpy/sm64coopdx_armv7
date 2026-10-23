@@ -598,6 +598,14 @@ jobs:
           name: sm64coopdx-armv7
           path: out/*
 
+      - name: Guardar simbolos de depuracion (libmain sin recortar)
+        run: |
+          SYM=$(find platform/app/build -name libmain.so -path "*armeabi-v7a*" -printf '%s %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+          echo "Simbolos: $SYM"
+          mkdir -p out
+          gzip -9 -c "$SYM" > "out/libmain-armv7-symbols-${GITHUB_REF_NAME:-manual}.so.gz"
+          ls -l out
+
       - name: Publicar pre-release en GitHub
         if: startsWith(github.ref, 'refs/tags/')
         env:
