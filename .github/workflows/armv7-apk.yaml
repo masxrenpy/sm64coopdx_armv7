@@ -576,6 +576,277 @@ jobs:
                    '    glGenBuffers(1, &opengl_vbo);\n\n    glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);\n')
           PYEOF
           git diff --stat src/pc/gfx/gfx_opengl.c
+
+      - name: Optimizacion GL - caches de estado y VAO (prueba A/B)
+        if: ${{ inputs.perflog }}
+        run: |
+          python3 - << 'PYEOF'
+          import pathlib
+
+          def patch(path, old, new):
+              p = pathlib.Path(path); t = p.read_text()
+              assert t.count(old) == 1, (path, old[:60])
+              p.write_text(t.replace(old, new))
+
+          F = 'src/pc/gfx/gfx_opengl.c'
+
+          # --- estructuras: cache de uniformes y VAO por programa; cache de muestreo por textura
+          patch(F, '    bool used_lightmap;\n    bool world_geometry;\n};\n',
+                   '    bool used_lightmap;\n    bool world_geometry;\n'
+                   '    GLuint vao;\n'
+                   '    bool uc_valid;\n    float uc_noise;\n    float uc_light[3];\n    int uc_filtering;\n'
+                   '    int uc_flags[SHADER_FLAG_MAX];\n    float uc_flag_values[SHADER_FLAG_MAX];\n'
+                   '    bool uc_tex_valid[2];\n    float uc_tex_size[2][2];\n    int uc_tex_filter[2];\n};\n')
+          patch(F, '    GLfloat size[2];\n    bool filter;\n};\n',
+                   '    GLfloat size[2];\n    bool filter;\n    bool sampler_valid;\n    uint8_t sampler_key;\n};\n')
+
+          # --- variables, estadisticas, invalidacion de caches y ciclo de pruebas
+          patch(F, 'static uint32_t frame_count;\n',
+                   'static uint32_t frame_count;\n\n'
+                   '// ---- Optimizaciones de estado de OpenGL, con interruptor en tiempo de ejecucion para poder medirlas ----\n'
+                   'static bool sOptTex = false;   // cache de texturas enlazadas, parametros de muestreo y uniformes\n'
+                   'static bool sOptVao = false;   // un VAO por programa de shader\n'
+                   'static int sActiveUnit = -1;\n'
+                   'static GLuint sBoundTex[2] = { 0, 0 };\n'
+                   'static int sOptStart = -2;\n'
+                   'static int sOptPrevMode = -1;\n'
+                   'static unsigned int sStLast = 0;\n'
+                   'static struct { uint32_t frames, select_calls, bind_skip, sampler_calls, sampler_skip, uni_calls, uni_skip, shader_loads; } sSt;\n\n'
+                   'static void gfx_opengl_cache_invalidate(void) {\n'
+                   '    sActiveUnit = -1;\n'
+                   '    sBoundTex[0] = 0;\n'
+                   '    sBoundTex[1] = 0;\n'
+                   '    for (int i = 0; i < num_textures; i++) { tex_cache[i].sampler_valid = false; }\n'
+                   '    for (size_t i = 0; i < shader_program_pool_size; i++) { shader_program_pool[i].uc_valid = false; shader_program_pool[i].uc_tex_valid[0] = false; shader_program_pool[i].uc_tex_valid[1] = false; }\n'
+                   '}\n')
+
+          # --- uniformes del shader (con cache cuando sOptTex)
+          patch(F, 'static inline void gfx_opengl_set_shader_uniforms(struct ShaderProgram *prg) {\n'
+                   '    if (prg->used_noise) { glUniform1f(prg->uniform_locations[4], (float)frame_count); }\n'
+                   '    if (prg->used_lightmap) { glUniform3f(prg->uniform_locations[5], gVertexColor[0] / 255.0f, gVertexColor[1] / 255.0f, gVertexColor[2] / 255.0f); }\n'
+                   '    if (prg->world_geometry) {\n'
+                   '        glUniform1iv(prg->uniform_locations[6], SHADER_FLAG_MAX, gShaderFlags);\n'
+                   '        glUniform1fv(prg->uniform_locations[7], SHADER_FLAG_MAX, gShaderFlagValues);\n'
+                   '    }\n\n'
+                   '    glUniform1i(prg->uniform_locations[8], configFiltering);\n}\n',
+                   'static inline void gfx_opengl_set_shader_uniforms(struct ShaderProgram *prg) {\n'
+                   '    if (!sOptTex) {\n'
+                   '        if (prg->used_noise) { glUniform1f(prg->uniform_locations[4], (float)frame_count); sSt.uni_calls++; }\n'
+                   '        if (prg->used_lightmap) { glUniform3f(prg->uniform_locations[5], gVertexColor[0] / 255.0f, gVertexColor[1] / 255.0f, gVertexColor[2] / 255.0f); sSt.uni_calls++; }\n'
+                   '        if (prg->world_geometry) {\n'
+                   '            glUniform1iv(prg->uniform_locations[6], SHADER_FLAG_MAX, gShaderFlags);\n'
+                   '            glUniform1fv(prg->uniform_locations[7], SHADER_FLAG_MAX, gShaderFlagValues);\n'
+                   '            sSt.uni_calls += 2;\n'
+                   '        }\n'
+                   '        glUniform1i(prg->uniform_locations[8], configFiltering);\n'
+                   '        sSt.uni_calls++;\n'
+                   '        return;\n'
+                   '    }\n'
+                   '    const bool all = !prg->uc_valid;\n'
+                   '    if (prg->used_noise) {\n'
+                   '        float v = (float) frame_count;\n'
+                   '        if (all || prg->uc_noise != v) { glUniform1f(prg->uniform_locations[4], v); prg->uc_noise = v; sSt.uni_calls++; } else { sSt.uni_skip++; }\n'
+                   '    }\n'
+                   '    if (prg->used_lightmap) {\n'
+                   '        float c[3] = { gVertexColor[0] / 255.0f, gVertexColor[1] / 255.0f, gVertexColor[2] / 255.0f };\n'
+                   '        if (all || memcmp(c, prg->uc_light, sizeof(c)) != 0) { glUniform3f(prg->uniform_locations[5], c[0], c[1], c[2]); memcpy(prg->uc_light, c, sizeof(c)); sSt.uni_calls++; } else { sSt.uni_skip++; }\n'
+                   '    }\n'
+                   '    if (prg->world_geometry) {\n'
+                   '        if (all || memcmp(gShaderFlags, prg->uc_flags, sizeof(gShaderFlags)) != 0 || memcmp(gShaderFlagValues, prg->uc_flag_values, sizeof(gShaderFlagValues)) != 0) {\n'
+                   '            glUniform1iv(prg->uniform_locations[6], SHADER_FLAG_MAX, gShaderFlags);\n'
+                   '            glUniform1fv(prg->uniform_locations[7], SHADER_FLAG_MAX, gShaderFlagValues);\n'
+                   '            memcpy(prg->uc_flags, gShaderFlags, sizeof(gShaderFlags));\n'
+                   '            memcpy(prg->uc_flag_values, gShaderFlagValues, sizeof(gShaderFlagValues));\n'
+                   '            sSt.uni_calls += 2;\n'
+                   '        } else { sSt.uni_skip += 2; }\n'
+                   '    }\n'
+                   '    if (all || prg->uc_filtering != (int) configFiltering) { glUniform1i(prg->uniform_locations[8], configFiltering); prg->uc_filtering = (int) configFiltering; sSt.uni_calls++; } else { sSt.uni_skip++; }\n'
+                   '    prg->uc_valid = true;\n}\n')
+
+          patch(F, 'static inline void gfx_opengl_set_texture_uniforms(struct ShaderProgram *prg, const int tile) {\n'
+                   '    if (prg->used_textures[tile] && opengl_tex[tile]) {\n'
+                   '        glUniform2f(prg->uniform_locations[tile*2 + 0], opengl_tex[tile]->size[0], opengl_tex[tile]->size[1]);\n'
+                   '        glUniform1i(prg->uniform_locations[tile*2 + 1], opengl_tex[tile]->filter);\n'
+                   '    }\n}\n',
+                   'static inline void gfx_opengl_set_texture_uniforms(struct ShaderProgram *prg, const int tile) {\n'
+                   '    if (prg->used_textures[tile] && opengl_tex[tile]) {\n'
+                   '        if (!sOptTex) {\n'
+                   '            glUniform2f(prg->uniform_locations[tile*2 + 0], opengl_tex[tile]->size[0], opengl_tex[tile]->size[1]);\n'
+                   '            glUniform1i(prg->uniform_locations[tile*2 + 1], opengl_tex[tile]->filter);\n'
+                   '            sSt.uni_calls += 2;\n'
+                   '            return;\n'
+                   '        }\n'
+                   '        float w = opengl_tex[tile]->size[0];\n'
+                   '        float h = opengl_tex[tile]->size[1];\n'
+                   '        int f = opengl_tex[tile]->filter ? 1 : 0;\n'
+                   '        bool all = !prg->uc_tex_valid[tile];\n'
+                   '        if (all || prg->uc_tex_size[tile][0] != w || prg->uc_tex_size[tile][1] != h) {\n'
+                   '            glUniform2f(prg->uniform_locations[tile*2 + 0], w, h);\n'
+                   '            prg->uc_tex_size[tile][0] = w;\n'
+                   '            prg->uc_tex_size[tile][1] = h;\n'
+                   '            sSt.uni_calls++;\n'
+                   '        } else { sSt.uni_skip++; }\n'
+                   '        if (all || prg->uc_tex_filter[tile] != f) {\n'
+                   '            glUniform1i(prg->uniform_locations[tile*2 + 1], f);\n'
+                   '            prg->uc_tex_filter[tile] = f;\n'
+                   '            sSt.uni_calls++;\n'
+                   '        } else { sSt.uni_skip++; }\n'
+                   '        prg->uc_tex_valid[tile] = true;\n'
+                   '    }\n}\n')
+
+          # --- descarga y carga de shaders (VAO por programa)
+          patch(F, '        for (int i = 0; i < old_prg->num_attribs; i++)\n            glDisableVertexAttribArray(old_prg->attrib_locations[i]);\n',
+                   '        if (!sOptVao) {\n'
+                   '            for (int i = 0; i < old_prg->num_attribs; i++)\n                glDisableVertexAttribArray(old_prg->attrib_locations[i]);\n'
+                   '        }\n')
+
+          patch(F, 'static void gfx_opengl_load_shader(struct ShaderProgram *new_prg) {\n'
+                   '    opengl_prg = new_prg;\n'
+                   '    glUseProgram(new_prg->opengl_program_id);\n'
+                   '    gfx_opengl_vertex_array_set_attribs(new_prg);\n',
+                   'static void gfx_opengl_bind_attribs(struct ShaderProgram *prg) {\n'
+                   '    if (!sOptVao) {\n'
+                   '        gfx_opengl_vertex_array_set_attribs(prg);\n'
+                   '        return;\n'
+                   '    }\n'
+                   '    if (prg->vao == 0) {\n'
+                   '        glGenVertexArrays(1, &prg->vao);\n'
+                   '        glBindVertexArray(prg->vao);\n'
+                   '        gfx_opengl_vertex_array_set_attribs(prg);\n'
+                   '    } else {\n'
+                   '        glBindVertexArray(prg->vao);\n'
+                   '    }\n'
+                   '}\n\n'
+                   'static void gfx_opengl_load_shader(struct ShaderProgram *new_prg) {\n'
+                   '    opengl_prg = new_prg;\n'
+                   '    sSt.shader_loads++;\n'
+                   '    glUseProgram(new_prg->opengl_program_id);\n'
+                   '    gfx_opengl_bind_attribs(new_prg);\n')
+
+          # --- un programa nuevo empieza sin caches ni VAO
+          patch(F, '    prg->hash = cc->hash;\n    prg->opengl_program_id = shader_program;\n',
+                   '    prg->hash = cc->hash;\n    prg->opengl_program_id = shader_program;\n'
+                   '    prg->vao = 0;\n    prg->uc_valid = false;\n    prg->uc_tex_valid[0] = false;\n    prg->uc_tex_valid[1] = false;\n')
+
+          # --- texturas
+          patch(F, '    glGenTextures(1, &tex_cache[num_textures].gltex);\n',
+                   '    glGenTextures(1, &tex_cache[num_textures].gltex);\n    tex_cache[num_textures].sampler_valid = false;\n')
+
+          patch(F, 'static void gfx_opengl_select_texture(int tile, GLuint texture_id) {\n'
+                   '    opengl_tex[tile] = tex_cache + texture_id;\n'
+                   '    opengl_curtex = tile;\n'
+                   '    glActiveTexture(GL_TEXTURE0 + tile);\n'
+                   '    glBindTexture(GL_TEXTURE_2D, opengl_tex[tile]->gltex);\n',
+                   'static void gfx_opengl_select_texture(int tile, GLuint texture_id) {\n'
+                   '    opengl_tex[tile] = tex_cache + texture_id;\n'
+                   '    opengl_curtex = tile;\n'
+                   '    sSt.select_calls++;\n'
+                   '    if (sOptTex) {\n'
+                   '        if (sActiveUnit != tile) { glActiveTexture(GL_TEXTURE0 + tile); sActiveUnit = tile; }\n'
+                   '        if (sBoundTex[tile] != opengl_tex[tile]->gltex) {\n'
+                   '            glBindTexture(GL_TEXTURE_2D, opengl_tex[tile]->gltex);\n'
+                   '            sBoundTex[tile] = opengl_tex[tile]->gltex;\n'
+                   '        } else { sSt.bind_skip++; }\n'
+                   '    } else {\n'
+                   '        glActiveTexture(GL_TEXTURE0 + tile);\n'
+                   '        glBindTexture(GL_TEXTURE_2D, opengl_tex[tile]->gltex);\n'
+                   '    }\n')
+
+          patch(F, 'static void gfx_opengl_set_sampler_parameters(int tile, bool linear_filter, uint32_t cms, uint32_t cmt) {\n'
+                   '    const GLenum filter = linear_filter ? GL_LINEAR : GL_NEAREST;\n'
+                   '    glActiveTexture(GL_TEXTURE0 + tile);\n'
+                   '    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);\n'
+                   '    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);\n'
+                   '    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gfx_cm_to_opengl(cms));\n'
+                   '    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gfx_cm_to_opengl(cmt));\n',
+                   'static void gfx_opengl_set_sampler_parameters(int tile, bool linear_filter, uint32_t cms, uint32_t cmt) {\n'
+                   '    const GLenum filter = linear_filter ? GL_LINEAR : GL_NEAREST;\n'
+                   '    struct GLTexture *tx = opengl_tex[tile];\n'
+                   '    bool apply = true;\n'
+                   '    uint8_t key = 0;\n'
+                   '    sSt.sampler_calls++;\n'
+                   '    if (sOptTex && tx != NULL) {\n'
+                   '        uint8_t cs = (cms & G_TX_CLAMP) ? 1 : ((cms & G_TX_MIRROR) ? 2 : 0);\n'
+                   '        uint8_t ct = (cmt & G_TX_CLAMP) ? 1 : ((cmt & G_TX_MIRROR) ? 2 : 0);\n'
+                   '        key = (uint8_t) ((linear_filter ? 1 : 0) | (cs << 1) | (ct << 3));\n'
+                   '        if (tx->sampler_valid && tx->sampler_key == key) { apply = false; sSt.sampler_skip++; }\n'
+                   '    }\n'
+                   '    if (apply) {\n'
+                   '        if (sOptTex) {\n'
+                   '            if (sActiveUnit != tile) { glActiveTexture(GL_TEXTURE0 + tile); sActiveUnit = tile; }\n'
+                   '            if (tx != NULL && sBoundTex[tile] != tx->gltex) { glBindTexture(GL_TEXTURE_2D, tx->gltex); sBoundTex[tile] = tx->gltex; }\n'
+                   '        } else {\n'
+                   '            glActiveTexture(GL_TEXTURE0 + tile);\n'
+                   '        }\n'
+                   '        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);\n'
+                   '        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);\n'
+                   '        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gfx_cm_to_opengl(cms));\n'
+                   '        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gfx_cm_to_opengl(cmt));\n'
+                   '        if (sOptTex && tx != NULL) { tx->sampler_key = key; tx->sampler_valid = true; }\n'
+                   '    }\n')
+
+          # --- cambio de modo, ciclo automatico y estadisticas (por fotograma)
+          patch(F, 'static void gfx_opengl_start_frame(void) {\n    frame_count++;\n',
+                   'static void gfx_opengl_set_opt_mode(int mode) {\n'
+                   '    bool newVao = (mode >= 2);\n'
+                   '    if (newVao && !sOptVao) {\n'
+                   '        for (size_t i = 0; i < shader_program_pool_size; i++) {\n'
+                   '            if (shader_program_pool[i].vao != 0) { glDeleteVertexArrays(1, &shader_program_pool[i].vao); shader_program_pool[i].vao = 0; }\n'
+                   '        }\n'
+                   '        sOptVao = true;\n'
+                   '        if (opengl_prg != NULL) { gfx_opengl_bind_attribs(opengl_prg); }\n'
+                   '    } else if (!newVao && sOptVao) {\n'
+                   '        sOptVao = false;\n'
+                   '        glBindVertexArray(0);\n'
+                   '        for (int i = 0; i < 8; i++) { glDisableVertexAttribArray(i); }\n'
+                   '        if (opengl_prg != NULL) { gfx_opengl_vertex_array_set_attribs(opengl_prg); }\n'
+                   '    }\n'
+                   '    sOptTex = (mode >= 1);\n'
+                   '    gfx_opengl_cache_invalidate();\n'
+                   '}\n\n'
+                   '// perf_mode.txt: segundos (desde que se abre la app) tras los cuales empieza un ciclo de 20 s por paso:\n'
+                   '// 0 sin optimizaciones, 1 cache de texturas y uniformes, 2 cache + un VAO por programa. Despues vuelve al 0.\n'
+                   'static void gfx_opengl_opt_cycle(void) {\n'
+                   '    if (sOptStart == -2) {\n'
+                   '        sOptStart = -1;\n'
+                   '        FILE *f = fopen("/storage/emulated/0/com.maniscat2.sm64coopdx/perf_mode.txt", "r");\n'
+                   '        if (f) {\n'
+                   '            int s = 0;\n'
+                   '            if (fscanf(f, "%d", &s) == 1 && s >= 0) { sOptStart = s; }\n'
+                   '            fclose(f);\n'
+                   '        }\n'
+                   '        printf("OPTCICLO inicio=%d s (-1 = desactivado); 20 s por paso: 0 base, 1 cache texturas+uniformes, 2 cache + VAO\\n", sOptStart);\n'
+                   '        fflush(stdout);\n'
+                   '    }\n'
+                   '    int mode = 0;\n'
+                   '    unsigned int t = SDL_GetTicks() / 1000;\n'
+                   '    if (sOptStart >= 0 && t >= (unsigned int) sOptStart) {\n'
+                   '        unsigned int step = (t - (unsigned int) sOptStart) / 20;\n'
+                   '        if (step <= 2) { mode = (int) step; }\n'
+                   '    }\n'
+                   '    if (mode != sOptPrevMode) {\n'
+                   '        printf("OPTMODE %d t=%us\\n", mode, t);\n'
+                   '        fflush(stdout);\n'
+                   '        gfx_opengl_set_opt_mode(mode);\n'
+                   '        sOptPrevMode = mode;\n'
+                   '    }\n'
+                   '    sSt.frames++;\n'
+                   '    unsigned int now = SDL_GetTicks();\n'
+                   '    if (sStLast == 0) { sStLast = now; }\n'
+                   '    if (now - sStLast >= 1000) {\n'
+                   '        if (sSt.frames > 0) {\n'
+                   '            double n = (double) sSt.frames;\n'
+                   '            printf("GLSTAT modo=%d por fotograma: seleccion_textura=%.0f (sin reenlazar %.0f) muestreo=%.0f (omitidos %.0f) uniformes=%.0f (omitidos %.0f) cargas_shader=%.0f\\n",\n'
+                   '                mode, sSt.select_calls / n, sSt.bind_skip / n, sSt.sampler_calls / n, sSt.sampler_skip / n, sSt.uni_calls / n, sSt.uni_skip / n, sSt.shader_loads / n);\n'
+                   '            fflush(stdout);\n'
+                   '        }\n'
+                   '        memset(&sSt, 0, sizeof(sSt));\n'
+                   '        sStLast = now;\n'
+                   '    }\n'
+                   '}\n\n'
+                   'static void gfx_opengl_start_frame(void) {\n    frame_count++;\n    gfx_opengl_opt_cycle();\n')
+          PYEOF
+          git diff --stat src/pc/gfx/gfx_opengl.c
           
       - name: Make del host (genera archivos del juego)
         run: |
