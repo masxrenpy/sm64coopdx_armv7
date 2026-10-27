@@ -817,34 +817,80 @@ jobs:
                    '        }\n'
                    '        printf("OPTCICLO inicio=%d s (-1 = desactivado); 20 s por paso: 0 base, 1 cache texturas+uniformes, 2 cache + VAO\\n", sOptStart);\n'
                    '        fflush(stdout);\n'
+      - name: Prueba de agua - viewport 1x1 y sin mezclado (perflog)
+        if: ${{ inputs.perflog }}
+        run: |
+          python3 - << 'PYEOF'
+          import pathlib
+
+          def patch(path, old, new):
+              p = pathlib.Path(path); t = p.read_text()
+              assert t.count(old) == 1, (path, old[:60])
+              p.write_text(t.replace(old, new))
+
+          F = 'src/pc/gfx/gfx_opengl.c'
+
+          # viewport vigente (para restaurarlo tras un dibujo con viewport reducido)
+          patch(F, 'static void gfx_opengl_set_viewport(int x, int y, int width, int height) {\n    glViewport(x, y, width, height);\n}\n',
+                   'static int sVpX = 0, sVpY = 0, sVpW = 1, sVpH = 1;\n\n'
+                   'static void gfx_opengl_set_viewport(int x, int y, int width, int height) {\n'
+                   '    sVpX = x; sVpY = y; sVpW = width; sVpH = height;\n'
+                   '    glViewport(x, y, width, height);\n}\n')
+
+          # ciclo de pruebas + mezclado de transparencias
+          patch(F, 'static void gfx_opengl_set_use_alpha(bool use_alpha) {\n'
+                   '    if (use_alpha) {\n'
+                   '        glEnable(GL_BLEND);\n'
+                   '    } else {\n'
+                   '        glDisable(GL_BLEND);\n'
+                   '    }\n'
+                   '}\n',
+                   '// perf_mode.txt: segundos (desde que se abre la app) tras los cuales empieza un ciclo de 20 s por paso:\n'
+                   '// 0 normal, 1 viewport de 1x1 (se quita el trabajo de relleno), 2 sin mezclado de transparencias. Despues vuelve al 0.\n'
+                   'static bool sLastAlpha = false;\n'
+                   'static int sWStart = -2;\n'
+                   'static int sWPrev = -1;\n\n'
+                   'static int gfx_opengl_wmode(void) {\n'
+                   '    if (sWStart == -2) {\n'
+                   '        sWStart = -1;\n'
+                   '        FILE *f = fopen("/storage/emulated/0/com.maniscat2.sm64coopdx/perf_mode.txt", "r");\n'
+                   '        if (f) {\n'
+                   '            int s = 0;\n'
+                   '            if (fscanf(f, "%d", &s) == 1 && s >= 0) { sWStart = s; }\n'
+                   '            fclose(f);\n'
+                   '        }\n'
+                   '        printf("WCICLO inicio=%d s (-1 = desactivado); 20 s por paso: 0 normal, 1 viewport 1x1, 2 sin mezclado\\n", sWStart);\n'
+                   '        fflush(stdout);\n'
                    '    }\n'
                    '    int mode = 0;\n'
                    '    unsigned int t = SDL_GetTicks() / 1000;\n'
-                   '    if (sOptStart >= 0 && t >= (unsigned int) sOptStart) {\n'
-                   '        unsigned int step = (t - (unsigned int) sOptStart) / 20;\n'
+                   '    if (sWStart >= 0 && t >= (unsigned int) sWStart) {\n'
+                   '        unsigned int step = (t - (unsigned int) sWStart) / 20;\n'
                    '        if (step <= 2) { mode = (int) step; }\n'
                    '    }\n'
-                   '    if (mode != sOptPrevMode) {\n'
-                   '        printf("OPTMODE %d t=%us\\n", mode, t);\n'
+                   '    if (mode != sWPrev) {\n'
+                   '        printf("WMODE %d t=%us\\n", mode, t);\n'
                    '        fflush(stdout);\n'
-                   '        gfx_opengl_set_opt_mode(mode);\n'
-                   '        sOptPrevMode = mode;\n'
+                   '        sWPrev = mode;\n'
+                   '        if (sLastAlpha && mode != 2) { glEnable(GL_BLEND); } else { glDisable(GL_BLEND); }\n'
                    '    }\n'
-                   '    sSt.frames++;\n'
-                   '    unsigned int now = SDL_GetTicks();\n'
-                   '    if (sStLast == 0) { sStLast = now; }\n'
-                   '    if (now - sStLast >= 1000) {\n'
-                   '        if (sSt.frames > 0) {\n'
-                   '            double n = (double) sSt.frames;\n'
-                   '            printf("GLSTAT modo=%d por fotograma: seleccion_textura=%.0f (sin reenlazar %.0f) muestreo=%.0f (omitidos %.0f) uniformes=%.0f (omitidos %.0f) cargas_shader=%.0f\\n",\n'
-                   '                mode, sSt.select_calls / n, sSt.bind_skip / n, sSt.sampler_calls / n, sSt.sampler_skip / n, sSt.uni_calls / n, sSt.uni_skip / n, sSt.shader_loads / n);\n'
-                   '            fflush(stdout);\n'
-                   '        }\n'
-                   '        memset(&sSt, 0, sizeof(sSt));\n'
-                   '        sStLast = now;\n'
-                   '    }\n'
+                   '    return mode;\n'
                    '}\n\n'
-                   'static void gfx_opengl_start_frame(void) {\n    frame_count++;\n    gfx_opengl_opt_cycle();\n')
+                   'static void gfx_opengl_set_use_alpha(bool use_alpha) {\n'
+                   '    sLastAlpha = use_alpha;\n'
+                   '    if (use_alpha && gfx_opengl_wmode() != 2) {\n'
+                   '        glEnable(GL_BLEND);\n'
+                   '    } else {\n'
+                   '        glDisable(GL_BLEND);\n'
+                   '    }\n'
+                   '}\n')
+
+          patch(F, '    glDrawArrays(GL_TRIANGLES, off / stride, verts);\n    sRingOffset = off + bytes;\n}\n',
+                   '    int wm = gfx_opengl_wmode();\n'
+                   '    if (wm == 1) { glViewport(0, 0, 1, 1); }\n'
+                   '    glDrawArrays(GL_TRIANGLES, off / stride, verts);\n'
+                   '    if (wm == 1) { glViewport(sVpX, sVpY, sVpW, sVpH); }\n'
+                   '    sRingOffset = off + bytes;\n}\n')
           PYEOF
           git diff --stat src/pc/gfx/gfx_opengl.c
           
