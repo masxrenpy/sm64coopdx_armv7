@@ -577,7 +577,151 @@ jobs:
           PYEOF
           git diff --stat src/pc/gfx/gfx_opengl.c
 
-      - name: Prueba de agua - viewport 1x1 y sin mezclado (perflog)
+      - name: Prueba de escala de renderizado - Java (perflog)
+        if: ${{ inputs.perflog }}
+        run: |
+          python3 - << 'PYEOF'
+          import pathlib
+
+          def patch(path, old, new, count=1):
+              p = pathlib.Path(path); t = p.read_text()
+              assert t.count(old) == count, (path, old[:60], t.count(old))
+              p.write_text(t.replace(old, new))
+
+          J = 'platform/app/src/main/java/org/libsdl/app/SDLSurface.java'
+
+          # 1) campos y metodos de la escala de renderizado (prototipo de pruebas; inactivo si no existe render_scale.txt)
+          patch(J, '    // Keep track of the surface size to normalize touch events\n    protected float mWidth, mHeight;\n',
+                   '    // Keep track of the surface size to normalize touch events\n    protected float mWidth, mHeight;\n\n'
+                   '    // ---- Escala de renderizado (prototipo de pruebas) ----\n'
+                   '    // render_scale.txt en la carpeta del juego: un numero (30-100) fija la escala; "ciclo S" alterna\n'
+                   '    // 100% -> 75% -> 60% -> 100% (20 s cada paso) a partir de S segundos desde que arranca la app.\n'
+                   '    // Sin ese archivo no se hace nada.\n'
+                   '    private float mScaleStatic = 1.0f;\n'
+                   '    private int mCycleStart = -1;\n'
+                   '    private long mScaleT0 = 0;\n'
+                   '    private boolean mFixedActive = false;\n\n'
+                   '    private boolean renderScaleEnabled() {\n'
+                   '        return mScaleStatic < 0.999f || mCycleStart >= 0;\n'
+                   '    }\n\n'
+                   '    private void loadRenderScaleConfig() {\n'
+                   '        mScaleT0 = android.os.SystemClock.uptimeMillis();\n'
+                   '        try {\n'
+                   '            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader("/storage/emulated/0/com.maniscat2.sm64coopdx/render_scale.txt"));\n'
+                   '            String line = r.readLine();\n'
+                   '            r.close();\n'
+                   '            if (line != null) {\n'
+                   '                line = line.trim();\n'
+                   '                if (line.startsWith("ciclo")) {\n'
+                   '                    String[] parts = line.split("\\\\s+");\n'
+                   '                    mCycleStart = (parts.length > 1) ? Integer.parseInt(parts[1]) : 0;\n'
+                   '                } else {\n'
+                   '                    int v = Integer.parseInt(line);\n'
+                   '                    mScaleStatic = Math.max(30, Math.min(100, v)) / 100.0f;\n'
+                   '                }\n'
+                   '            }\n'
+                   '        } catch (Exception ignored) {\n'
+                   '        }\n'
+                   '        if (mCycleStart >= 0) {\n'
+                   '            final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());\n'
+                   '            h.postDelayed(new Runnable() {\n'
+                   '                public void run() {\n'
+                   '                    applyScale(currentScale());\n'
+                   '                    h.postDelayed(this, 500);\n'
+                   '                }\n'
+                   '            }, 500);\n'
+                   '        }\n'
+                   '    }\n\n'
+                   '    private float currentScale() {\n'
+                   '        if (mCycleStart < 0) {\n'
+                   '            return mScaleStatic;\n'
+                   '        }\n'
+                   '        long t = (android.os.SystemClock.uptimeMillis() - mScaleT0) / 1000;\n'
+                   '        if (t < mCycleStart) {\n'
+                   '            return 1.0f;\n'
+                   '        }\n'
+                   '        long step = (t - mCycleStart) / 20;\n'
+                   '        if (step == 1) {\n'
+                   '            return 0.75f;\n'
+                   '        }\n'
+                   '        if (step == 2) {\n'
+                   '            return 0.60f;\n'
+                   '        }\n'
+                   '        return 1.0f;\n'
+                   '    }\n\n'
+                   '    private void applyScale(float s) {\n'
+                   '        int w = getWidth();\n'
+                   '        int h = getHeight();\n'
+                   '        if (w <= 0 || h <= 0) {\n'
+                   '            return;\n'
+                   '        }\n'
+                   '        if (s >= 0.999f) {\n'
+                   '            if (mFixedActive) {\n'
+                   '                mFixedActive = false;\n'
+                   '                getHolder().setSizeFromLayout();\n'
+                   '            }\n'
+                   '        } else {\n'
+                   '            int tw = Math.max(1, Math.round(w * s));\n'
+                   '            int th = Math.max(1, Math.round(h * s));\n'
+                   '            mFixedActive = true;\n'
+                   '            getHolder().setFixedSize(tw, th);\n'
+                   '        }\n'
+                   '    }\n\n'
+                   '    // Devuelve true si este surfaceChanged solo reflejaba un tamano que se va a corregir.\n'
+                   '    private boolean handleRenderScale(SurfaceHolder holder, int width, int height) {\n'
+                   '        if (!renderScaleEnabled()) {\n'
+                   '            return false;\n'
+                   '        }\n'
+                   '        int vw = getWidth();\n'
+                   '        int vh = getHeight();\n'
+                   '        if (vw <= 0 || vh <= 0) {\n'
+                   '            return false;\n'
+                   '        }\n'
+                   '        float s = currentScale();\n'
+                   '        if (s >= 0.999f) {\n'
+                   '            if (mFixedActive && (width != vw || height != vh)) {\n'
+                   '                mFixedActive = false;\n'
+                   '                holder.setSizeFromLayout();\n'
+                   '                return true;\n'
+                   '            }\n'
+                   '            return false;\n'
+                   '        }\n'
+                   '        int tw = Math.max(1, Math.round(vw * s));\n'
+                   '        int th = Math.max(1, Math.round(vh * s));\n'
+                   '        if (width != tw || height != th) {\n'
+                   '            mFixedActive = true;\n'
+                   '            holder.setFixedSize(tw, th);\n'
+                   '            return true;\n'
+                   '        }\n'
+                   '        return false;\n'
+                   '    }\n\n'
+                   '    // Los toques llegan en pixeles de la vista; con tamano fijo activo se normalizan con el tamano real de la vista.\n'
+                   '    private float touchW() {\n'
+                   '        int w = getWidth();\n'
+                   '        return (mFixedActive && w > 0) ? (float) w : mWidth;\n'
+                   '    }\n\n'
+                   '    private float touchH() {\n'
+                   '        int h = getHeight();\n'
+                   '        return (mFixedActive && h > 0) ? (float) h : mHeight;\n'
+                   '    }\n')
+
+          # 2) leer la configuracion al crear la vista
+          patch(J, '        mIsSurfaceReady = false;\n    }\n\n    public void handlePause() {',
+                   '        mIsSurfaceReady = false;\n        loadRenderScaleConfig();\n    }\n\n    public void handlePause() {')
+
+          # 3) gancho en surfaceChanged
+          patch(J, '        if (SDLActivity.mSingleton == null) {\n            return;\n        }\n\n        mWidth = width;\n        mHeight = height;\n',
+                   '        if (SDLActivity.mSingleton == null) {\n            return;\n        }\n\n'
+                   '        if (handleRenderScale(holder, width, height)) {\n            return;\n        }\n\n'
+                   '        mWidth = width;\n        mHeight = height;\n')
+
+          # 4) normalizacion de toques
+          patch(J, 'event.getX(i) / mWidth', 'event.getX(i) / touchW()', count=3)
+          patch(J, 'event.getY(i) / mHeight', 'event.getY(i) / touchH()', count=3)
+          PYEOF
+          git diff --stat platform/app/src/main/java/org/libsdl/app/SDLSurface.java
+
+      - name: Prueba de escala de renderizado - marcas de resolucion (perflog)
         if: ${{ inputs.perflog }}
         run: |
           python3 - << 'PYEOF'
@@ -590,67 +734,17 @@ jobs:
 
           F = 'src/pc/gfx/gfx_opengl.c'
 
-          # viewport vigente (para restaurarlo tras un dibujo con viewport reducido)
-          patch(F, 'static void gfx_opengl_set_viewport(int x, int y, int width, int height) {\n    glViewport(x, y, width, height);\n}\n',
-                   'static int sVpX = 0, sVpY = 0, sVpW = 1, sVpH = 1;\n\n'
-                   'static void gfx_opengl_set_viewport(int x, int y, int width, int height) {\n'
-                   '    sVpX = x; sVpY = y; sVpW = width; sVpH = height;\n'
-                   '    glViewport(x, y, width, height);\n}\n')
-
-          # ciclo de pruebas + mezclado de transparencias
-          patch(F, 'static void gfx_opengl_set_use_alpha(bool use_alpha) {\n'
-                   '    if (use_alpha) {\n'
-                   '        glEnable(GL_BLEND);\n'
-                   '    } else {\n'
-                   '        glDisable(GL_BLEND);\n'
-                   '    }\n'
-                   '}\n',
-                   '// perf_mode.txt: segundos (desde que se abre la app) tras los cuales empieza un ciclo de 20 s por paso:\n'
-                   '// 0 normal, 1 viewport de 1x1 (se quita el trabajo de relleno), 2 sin mezclado de transparencias. Despues vuelve al 0.\n'
-                   'static bool sLastAlpha = false;\n'
-                   'static int sWStart = -2;\n'
-                   'static int sWPrev = -1;\n\n'
-                   'static int gfx_opengl_wmode(void) {\n'
-                   '    if (sWStart == -2) {\n'
-                   '        sWStart = -1;\n'
-                   '        FILE *f = fopen("/storage/emulated/0/com.maniscat2.sm64coopdx/perf_mode.txt", "r");\n'
-                   '        if (f) {\n'
-                   '            int s = 0;\n'
-                   '            if (fscanf(f, "%d", &s) == 1 && s >= 0) { sWStart = s; }\n'
-                   '            fclose(f);\n'
-                   '        }\n'
-                   '        printf("WCICLO inicio=%d s (-1 = desactivado); 20 s por paso: 0 normal, 1 viewport 1x1, 2 sin mezclado\\n", sWStart);\n'
+          # marca en el registro cada vez que cambia la resolucion de dibujo
+          patch(F, 'static void gfx_opengl_start_frame(void) {\n    frame_count++;\n',
+                   'static unsigned int sResW = 0;\n'
+                   'static unsigned int sResH = 0;\n\n'
+                   'static void gfx_opengl_start_frame(void) {\n    frame_count++;\n'
+                   '    if (gfx_current_dimensions.width != sResW || gfx_current_dimensions.height != sResH) {\n'
+                   '        sResW = gfx_current_dimensions.width;\n'
+                   '        sResH = gfx_current_dimensions.height;\n'
+                   '        printf("RES %ux%u t=%us\\n", sResW, sResH, SDL_GetTicks() / 1000);\n'
                    '        fflush(stdout);\n'
-                   '    }\n'
-                   '    int mode = 0;\n'
-                   '    unsigned int t = SDL_GetTicks() / 1000;\n'
-                   '    if (sWStart >= 0 && t >= (unsigned int) sWStart) {\n'
-                   '        unsigned int step = (t - (unsigned int) sWStart) / 20;\n'
-                   '        if (step <= 2) { mode = (int) step; }\n'
-                   '    }\n'
-                   '    if (mode != sWPrev) {\n'
-                   '        printf("WMODE %d t=%us\\n", mode, t);\n'
-                   '        fflush(stdout);\n'
-                   '        sWPrev = mode;\n'
-                   '        if (sLastAlpha && mode != 2) { glEnable(GL_BLEND); } else { glDisable(GL_BLEND); }\n'
-                   '    }\n'
-                   '    return mode;\n'
-                   '}\n\n'
-                   'static void gfx_opengl_set_use_alpha(bool use_alpha) {\n'
-                   '    sLastAlpha = use_alpha;\n'
-                   '    if (use_alpha && gfx_opengl_wmode() != 2) {\n'
-                   '        glEnable(GL_BLEND);\n'
-                   '    } else {\n'
-                   '        glDisable(GL_BLEND);\n'
-                   '    }\n'
-                   '}\n')
-
-          patch(F, '    glDrawArrays(GL_TRIANGLES, off / stride, verts);\n    sRingOffset = off + bytes;\n}\n',
-                   '    int wm = gfx_opengl_wmode();\n'
-                   '    if (wm == 1) { glViewport(0, 0, 1, 1); }\n'
-                   '    glDrawArrays(GL_TRIANGLES, off / stride, verts);\n'
-                   '    if (wm == 1) { glViewport(sVpX, sVpY, sVpW, sVpH); }\n'
-                   '    sRingOffset = off + bytes;\n}\n')
+                   '    }\n')
           PYEOF
           git diff --stat src/pc/gfx/gfx_opengl.c
           
