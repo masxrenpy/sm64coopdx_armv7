@@ -764,6 +764,70 @@ jobs:
                    '    }\n')
           PYEOF
           git diff --stat src/pc/gfx/gfx_opengl.c
+
+      - name: Prueba de escala de renderizado - tamano del menu DJUI (perflog)
+        if: ${{ inputs.perflog }}
+        run: |
+          python3 - << 'PYEOF'
+          import pathlib
+
+          def patch(path, old, new):
+              p = pathlib.Path(path); t = p.read_text()
+              assert t.count(old) == 1, (path, old[:60])
+              p.write_text(t.replace(old, new))
+
+          F = 'src/pc/djui/djui_gfx.c'
+
+          patch(F, '#include "engine/math_util.h"\n',
+                   '#include "engine/math_util.h"\n'
+                   '#ifdef TARGET_ANDROID\n#include <stdio.h>\n#include <SDL2/SDL.h>\n#endif\n')
+
+          # Con la escala de renderizado activa la ventana tiene menos pixeles: el menu (medido en pixeles) se veria mas grande.
+          # Se multiplica la escala de DJUI por la proporcion (alto de la ventana / alto de la pantalla) para conservar su tamano relativo.
+          patch(F, 'f32 djui_gfx_get_scale(void) {\n',
+                   '#ifdef TARGET_ANDROID\n'
+                   'static f32 djui_gfx_render_ratio(void) {\n'
+                   '    static int sActive = -1;\n'
+                   '    static int sDisplayH = 0;\n'
+                   '    if (sActive < 0) {\n'
+                   '        FILE *f = fopen("/storage/emulated/0/com.maniscat2.sm64coopdx/render_scale.txt", "r");\n'
+                   '        sActive = (f != NULL) ? 1 : 0;\n'
+                   '        if (f != NULL) { fclose(f); }\n'
+                   '    }\n'
+                   '    if (!sActive) { return 1.0f; }\n'
+                   '    if (sDisplayH == 0) {\n'
+                   '        SDL_DisplayMode dm;\n'
+                   '        sDisplayH = (SDL_GetCurrentDisplayMode(0, &dm) == 0 && dm.h > 0) ? dm.h : -1;\n'
+                   '    }\n'
+                   '    if (sDisplayH <= 0) { return 1.0f; }\n'
+                   '    u32 windowWidth, windowHeight;\n'
+                   '    gfx_get_dimensions(&windowWidth, &windowHeight);\n'
+                   '    f32 r = (f32) windowHeight / (f32) sDisplayH;\n'
+                   '    return (r < 0.97f) ? clamp(r, 0.25f, 1.0f) : 1.0f;\n'
+                   '}\n'
+                   '#else\n'
+                   'static f32 djui_gfx_render_ratio(void) { return 1.0f; }\n'
+                   '#endif\n\n'
+                   'f32 djui_gfx_get_scale(void) {\n')
+
+          patch(F, '        switch (configDjuiScale) {\n'
+                   '            case 1:  return 0.5f;\n'
+                   '            case 2:  return 0.75f;\n'
+                   '            case 3:  return 1.0f;\n'
+                   '            case 4:  return 1.5f;\n'
+                   '            default: return 1.0f;\n'
+                   '        }\n',
+                   '        f32 base;\n'
+                   '        switch (configDjuiScale) {\n'
+                   '            case 1:  base = 0.5f; break;\n'
+                   '            case 2:  base = 0.75f; break;\n'
+                   '            case 3:  base = 1.0f; break;\n'
+                   '            case 4:  base = 1.5f; break;\n'
+                   '            default: base = 1.0f; break;\n'
+                   '        }\n'
+                   '        return base * djui_gfx_render_ratio();\n')
+          PYEOF
+          git diff --stat src/pc/djui/djui_gfx.c
           
       - name: Make del host (genera archivos del juego)
         run: |
