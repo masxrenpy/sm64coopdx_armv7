@@ -550,6 +550,262 @@ jobs:
           PYEOF
           git diff --stat src/pc/gfx/gfx_opengl.c
 
+      - name: Escala de renderizado - Java (superficie y toques)
+        run: |
+          python3 - << 'PYEOF'
+          import pathlib
+
+          def patch(path, old, new, count=1):
+              p = pathlib.Path(path); t = p.read_text()
+              assert t.count(old) == count, (path, old[:60], t.count(old))
+              p.write_text(t.replace(old, new))
+
+          S = 'platform/app/src/main/java/org/libsdl/app/SDLSurface.java'
+          A = 'platform/app/src/main/java/org/libsdl/app/SDLActivity.java'
+
+          # --- SDLSurface: escala de renderizado (se dibuja en un buffer mas pequeno y el sistema lo estira a la pantalla)
+          patch(S, '    // Keep track of the surface size to normalize touch events\n    protected float mWidth, mHeight;\n',
+                   '    // Keep track of the surface size to normalize touch events\n    protected float mWidth, mHeight;\n\n'
+                   '    // ---- Escala de renderizado (opcion del menu: Pantalla > Escala de renderizado) ----\n'
+                   '    // Con 100% no se toca nada. Con menos, la superficie se dibuja a un tamano fijo mas pequeno y el sistema la estira.\n'
+                   '    private float mScaleStatic = 1.0f;\n'
+                   '    private boolean mFixedActive = false;\n'
+                   '    private int mFullW = 0;\n'
+                   '    private int mFullH = 0;\n\n'
+                   '    // Sin parametros de diseno, la vista se ajusta al contenido y un tamano fijo la ENCOGERIA en vez de estirar la imagen.\n'
+                   '    private void ensureMatchParent() {\n'
+                   '        android.view.ViewGroup.LayoutParams lp = getLayoutParams();\n'
+                   '        if (lp != null && (lp.width != android.view.ViewGroup.LayoutParams.MATCH_PARENT || lp.height != android.view.ViewGroup.LayoutParams.MATCH_PARENT)) {\n'
+                   '            lp.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT;\n'
+                   '            lp.height = android.view.ViewGroup.LayoutParams.MATCH_PARENT;\n'
+                   '            setLayoutParams(lp);\n'
+                   '        }\n'
+                   '    }\n\n'
+                   '    // Se llama desde el hilo de la interfaz (ver SDLActivity.setRenderScalePercent).\n'
+                   '    public void setRenderScalePercent(int percent) {\n'
+                   '        mScaleStatic = Math.max(30, Math.min(100, percent)) / 100.0f;\n'
+                   '        applyScale(mScaleStatic);\n'
+                   '    }\n\n'
+                   '    private void applyScale(float s) {\n'
+                   '        if (!mFixedActive && getWidth() > 0 && getHeight() > 0) {\n'
+                   '            mFullW = getWidth();\n'
+                   '            mFullH = getHeight();\n'
+                   '        }\n'
+                   '        int w = (mFullW > 0) ? mFullW : getWidth();\n'
+                   '        int h = (mFullH > 0) ? mFullH : getHeight();\n'
+                   '        if (w <= 0 || h <= 0) {\n'
+                   '            return;\n'
+                   '        }\n'
+                   '        if (s >= 0.999f) {\n'
+                   '            if (mFixedActive) {\n'
+                   '                mFixedActive = false;\n'
+                   '                getHolder().setSizeFromLayout();\n'
+                   '            }\n'
+                   '        } else {\n'
+                   '            int tw = Math.max(1, Math.round(w * s));\n'
+                   '            int th = Math.max(1, Math.round(h * s));\n'
+                   '            ensureMatchParent();\n'
+                   '            mFixedActive = true;\n'
+                   '            getHolder().setFixedSize(tw, th);\n'
+                   '        }\n'
+                   '    }\n\n'
+                   '    // Devuelve true si este surfaceChanged solo reflejaba un tamano que se va a corregir.\n'
+                   '    private boolean handleRenderScale(SurfaceHolder holder, int width, int height) {\n'
+                   '        if (mScaleStatic >= 0.999f) {\n'
+                   '            return false;\n'
+                   '        }\n'
+                   '        int vw = getWidth();\n'
+                   '        int vh = getHeight();\n'
+                   '        if (vw <= 0 || vh <= 0) {\n'
+                   '            return false;\n'
+                   '        }\n'
+                   '        if (!mFixedActive) {\n'
+                   '            mFullW = vw;\n'
+                   '            mFullH = vh;\n'
+                   '        }\n'
+                   '        int tw = Math.max(1, Math.round(mFullW * mScaleStatic));\n'
+                   '        int th = Math.max(1, Math.round(mFullH * mScaleStatic));\n'
+                   '        if (width != tw || height != th) {\n'
+                   '            ensureMatchParent();\n'
+                   '            mFixedActive = true;\n'
+                   '            holder.setFixedSize(tw, th);\n'
+                   '            return true;\n'
+                   '        }\n'
+                   '        return false;\n'
+                   '    }\n\n'
+                   '    // Los toques llegan en pixeles de la vista; con tamano fijo activo se normalizan con el tamano real de la vista.\n'
+                   '    private float touchW() {\n'
+                   '        int w = getWidth();\n'
+                   '        return (mFixedActive && w > 0) ? (float) w : mWidth;\n'
+                   '    }\n\n'
+                   '    private float touchH() {\n'
+                   '        int h = getHeight();\n'
+                   '        return (mFixedActive && h > 0) ? (float) h : mHeight;\n'
+                   '    }\n')
+
+          patch(S, '        if (SDLActivity.mSingleton == null) {\n            return;\n        }\n\n        mWidth = width;\n        mHeight = height;\n',
+                   '        if (SDLActivity.mSingleton == null) {\n            return;\n        }\n\n'
+                   '        if (handleRenderScale(holder, width, height)) {\n            return;\n        }\n\n'
+                   '        mWidth = width;\n        mHeight = height;\n')
+          patch(S, 'event.getX(i) / mWidth', 'event.getX(i) / touchW()', count=3)
+          patch(S, 'event.getY(i) / mHeight', 'event.getY(i) / touchH()', count=3)
+
+          # --- SDLActivity: punto de entrada que llama el codigo nativo (JNI)
+          patch(A, '    protected static SDLSurface mSurface;\n',
+                   '    protected static SDLSurface mSurface;\n\n'
+                   '    // Lo llama el codigo nativo (opcion "Escala de renderizado"); la superficie solo se toca desde el hilo de la interfaz.\n'
+                   '    public void setRenderScalePercent(final int percent) {\n'
+                   '        runOnUiThread(new Runnable() {\n'
+                   '            public void run() {\n'
+                   '                if (mSurface != null) {\n'
+                   '                    mSurface.setRenderScalePercent(percent);\n'
+                   '                }\n'
+                   '            }\n'
+                   '        });\n'
+                   '    }\n')
+          PYEOF
+          git status --short | head -20
+
+      - name: Escala de renderizado - opcion del menu, configuracion y DJUI
+        run: |
+          python3 - << 'PYEOF'
+          import pathlib
+
+          def patch(path, old, new):
+              p = pathlib.Path(path); t = p.read_text()
+              assert t.count(old) == 1, (path, old[:60])
+              p.write_text(t.replace(old, new))
+
+          # ---------- archivos nuevos
+          pathlib.Path('src/pc/android_render_scale.h').write_text('''#ifndef ANDROID_RENDER_SCALE_H
+          #define ANDROID_RENDER_SCALE_H
+
+          // Aplica la opcion "Escala de renderizado" (configRenderScale: 0 = 100%, 1 = 75%, 2 = 60%).
+          // Solo hace algo en Android; en el resto de plataformas no hace nada.
+          void android_render_scale_apply(void);
+
+          #endif
+          ''')
+
+          pathlib.Path('src/pc/android_render_scale.c').write_text('''#include "android_render_scale.h"
+          #include "pc/configfile.h"
+
+          unsigned int configRenderScale = 0;
+
+          #ifdef TARGET_ANDROID
+          #include <jni.h>
+          #include <SDL2/SDL.h>
+
+          static const int sRenderScalePercents[3] = { 100, 75, 60 };
+
+          void android_render_scale_apply(void) {
+              JNIEnv *env = (JNIEnv *) SDL_AndroidGetJNIEnv();
+              jobject activity = (jobject) SDL_AndroidGetActivity();
+              if (env == NULL || activity == NULL) {
+                  return;
+              }
+              unsigned int index = (configRenderScale > 2) ? 0 : configRenderScale;
+              jclass cls = (*env)->GetObjectClass(env, activity);
+              jmethodID mid = (*env)->GetMethodID(env, cls, "setRenderScalePercent", "(I)V");
+              if (mid != NULL) {
+                  (*env)->CallVoidMethod(env, activity, mid, (jint) sRenderScalePercents[index]);
+              }
+              if ((*env)->ExceptionCheck(env)) {
+                  (*env)->ExceptionClear(env);
+              }
+              (*env)->DeleteLocalRef(env, cls);
+              (*env)->DeleteLocalRef(env, activity);
+          }
+          #else
+          void android_render_scale_apply(void) {
+          }
+          #endif
+          ''')
+
+          # ---------- configuracion
+          patch('src/pc/configfile.h', 'extern unsigned int configDrawDistance;\n',
+                'extern unsigned int configDrawDistance;\nextern unsigned int configRenderScale;\n')
+          patch('src/pc/configfile.c',
+                '    {.name = "coop_draw_distance",             .type = CONFIG_TYPE_UINT, .uintValue = &configDrawDistance},\n',
+                '    {.name = "coop_draw_distance",             .type = CONFIG_TYPE_UINT, .uintValue = &configDrawDistance},\n'
+                '    {.name = "render_scale",                   .type = CONFIG_TYPE_UINT, .uintValue = &configRenderScale},\n')
+
+          # ---------- menu: Opciones > Pantalla > Escala de renderizado (solo Android)
+          patch('src/pc/djui/djui_panel_display.c', '#include "pc/configfile.h"\n',
+                '#include "pc/configfile.h"\n#include "pc/android_render_scale.h"\n')
+          patch('src/pc/djui/djui_panel_display.c',
+                'static void djui_panel_display_apply(UNUSED struct DjuiBase* caller) {\n    configWindow.settings_changed = true;\n}\n',
+                'static void djui_panel_display_apply(UNUSED struct DjuiBase* caller) {\n    configWindow.settings_changed = true;\n}\n\n'
+                '#ifdef TARGET_ANDROID\n'
+                'static void djui_panel_display_render_scale_change(UNUSED struct DjuiBase* caller) {\n'
+                '    android_render_scale_apply();\n'
+                '}\n'
+                '#endif\n')
+          patch('src/pc/djui/djui_panel_display.c',
+                '        djui_selectionbox_create(body, DLANG(DISPLAY, DRAW_DISTANCE), drawDistanceChoices, ARRAY_COUNT(drawDistanceChoices), &configDrawDistance, NULL);\n',
+                '        djui_selectionbox_create(body, DLANG(DISPLAY, DRAW_DISTANCE), drawDistanceChoices, ARRAY_COUNT(drawDistanceChoices), &configDrawDistance, NULL);\n\n'
+                '#ifdef TARGET_ANDROID\n'
+                '        char* renderScaleChoices[] = { "100%", "75%", "60%" };\n'
+                '        djui_selectionbox_create(body, DLANG(DISPLAY, RENDER_SCALE), renderScaleChoices, ARRAY_COUNT(renderScaleChoices), &configRenderScale, djui_panel_display_render_scale_change);\n'
+                '#endif\n')
+
+          # ---------- DJUI: conservar el tamano relativo del menu cuando la ventana tiene menos pixeles
+          patch('src/pc/djui/djui_gfx.c', '#include "engine/math_util.h"\n',
+                '#include "engine/math_util.h"\n#include "pc/configfile.h"\n'
+                '#ifdef TARGET_ANDROID\n#include <SDL2/SDL.h>\n#endif\n')
+          patch('src/pc/djui/djui_gfx.c', 'f32 djui_gfx_get_scale(void) {\n',
+                '// Con la escala de renderizado activa la ventana tiene menos pixeles: el menu (medido en pixeles) se veria mas grande.\n'
+                '// Se multiplica la escala de DJUI por la proporcion (alto de la ventana / alto de la pantalla) para conservar su tamano relativo.\n'
+                '#ifdef TARGET_ANDROID\n'
+                'static f32 djui_gfx_render_ratio(void) {\n'
+                '    static int sDisplayH = 0;\n'
+                '    if (configRenderScale == 0) { return 1.0f; }\n'
+                '    if (sDisplayH == 0) {\n'
+                '        SDL_DisplayMode dm;\n'
+                '        sDisplayH = (SDL_GetCurrentDisplayMode(0, &dm) == 0 && dm.h > 0) ? dm.h : -1;\n'
+                '    }\n'
+                '    if (sDisplayH <= 0) { return 1.0f; }\n'
+                '    u32 windowWidth, windowHeight;\n'
+                '    gfx_get_dimensions(&windowWidth, &windowHeight);\n'
+                '    f32 r = (f32) windowHeight / (f32) sDisplayH;\n'
+                '    return (r < 0.97f) ? clamp(r, 0.25f, 1.0f) : 1.0f;\n'
+                '}\n'
+                '#else\n'
+                'static f32 djui_gfx_render_ratio(void) { return 1.0f; }\n'
+                '#endif\n\n'
+                'f32 djui_gfx_get_scale(void) {\n')
+          patch('src/pc/djui/djui_gfx.c',
+                '        switch (configDjuiScale) {\n'
+                '            case 1:  return 0.5f;\n'
+                '            case 2:  return 0.75f;\n'
+                '            case 3:  return 1.0f;\n'
+                '            case 4:  return 1.5f;\n'
+                '            default: return 1.0f;\n'
+                '        }\n',
+                '        f32 base;\n'
+                '        switch (configDjuiScale) {\n'
+                '            case 1:  base = 0.5f; break;\n'
+                '            case 2:  base = 0.75f; break;\n'
+                '            case 3:  base = 1.0f; break;\n'
+                '            case 4:  base = 1.5f; break;\n'
+                '            default: base = 1.0f; break;\n'
+                '        }\n'
+                '        return base * djui_gfx_render_ratio();\n')
+
+          # ---------- aplicar la escala guardada al arrancar (la ventana ya existe y la configuracion ya esta cargada)
+          patch('src/pc/pc_main.c', '#include "pc/utils/misc.h"\n',
+                '#include "pc/utils/misc.h"\n#include "pc/android_render_scale.h"\n')
+          patch('src/pc/pc_main.c', '        gWindowApi->set_scroll_callback(mouse_on_scroll);\n    }\n',
+                '        gWindowApi->set_scroll_callback(mouse_on_scroll);\n    }\n    android_render_scale_apply();\n')
+
+          # ---------- textos del menu
+          patch('lang/English.ini', 'DRAW_DISTANCE = "Draw Distance"\n',
+                'DRAW_DISTANCE = "Draw Distance"\nRENDER_SCALE = "Render Scale"\n')
+          patch('lang/Spanish.ini', 'DRAW_DISTANCE = "Distancia de dibujado"\n',
+                'DRAW_DISTANCE = "Distancia de dibujado"\nRENDER_SCALE = "Escala de renderizado"\n')
+          PYEOF
+          git status --short | head -20
+
       - name: Make del host (genera archivos del juego)
         run: |
           make -j$(nproc) TOUCH_CONTROLS=1 > make.log 2>&1 || {
