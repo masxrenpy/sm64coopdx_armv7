@@ -31,7 +31,7 @@ What's new
 Carried over from beta 2
 - Faster rendering (persistent vertex buffer), touch joystick fix, draw distance 3x by default on new installs.
 
-Updating from beta 2 keeps your settings. If the game shows graphical glitches, create an empty `legacy_upload.txt` in the game folder (`/storage/emulated/0/<application id>/`) and restart. If the image or the menu looks wrong after changing Render Scale, set `render_scale 0` in `sm64config.txt` (or delete that line).
+Updating from beta 2 keeps your settings. If the game shows graphical glitches, create an empty `legacy_upload.txt` in the game folder (`/storage/emulated/0/com.maniscat2.sm64coopdx32bits/`) and restart. If the image or the menu looks wrong after changing Render Scale, set `render_scale 0` in `sm64config.txt` (or delete that line).
 
 Verify the download with the `.sha256` file. Tested on a limited set of devices.
 
