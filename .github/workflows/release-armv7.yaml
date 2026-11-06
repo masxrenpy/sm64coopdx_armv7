@@ -812,6 +812,14 @@ jobs:
           ls -l platform/app/build/outputs/apk/release/
           unzip -l platform/app/build/outputs/apk/release/app-release-unsigned.apk | grep -E "lib/" || true
 
+      - name: Guardar simbolos de depuracion (libmain sin recortar)
+        run: |
+          SYM=$(find platform/app/build -name libmain.so -path "*armeabi-v7a*" -printf '%s %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+          echo "Simbolos: $SYM"
+          mkdir -p out
+          gzip -9 -c "$SYM" > "out/libmain-armv7-symbols-${GITHUB_REF_NAME:-manual}.so.gz"
+          ls -l out
+
       - name: Firmar APK con tu clave
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
@@ -838,22 +846,6 @@ jobs:
         with:
           name: sm64coopdx-armv7
           path: out/*
-
-      - name: Guardar simbolos de depuracion (libmain sin recortar)
-        run: |
-          SYM=$(find platform/app/build -name libmain.so -path "*armeabi-v7a*" -printf '%s %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
-          echo "Simbolos: $SYM"
-          mkdir -p out
-          gzip -9 -c "$SYM" > "out/libmain-armv7-symbols-${GITHUB_REF_NAME:-manual}.so.gz"
-          ls -l out
-
-      - name: Guardar simbolos de depuracion (libmain sin recortar)
-        run: |
-          SYM=$(find platform/app/build -name libmain.so -path "*armeabi-v7a*" -printf '%s %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
-          echo "Simbolos: $SYM"
-          mkdir -p out
-          gzip -9 -c "$SYM" > "out/libmain-armv7-symbols-${GITHUB_REF_NAME:-manual}.so.gz"
-          ls -l out
 
       - name: Publicar pre-release en GitHub
         if: startsWith(github.ref, 'refs/tags/')
