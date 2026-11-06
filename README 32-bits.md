@@ -44,6 +44,14 @@ native crash log; update checker removed.
 - Libraries: SDL2, Lua, libjuice, miniaudio, CoopNet (AGPL-3.0).
 - The corresponding source code for each release is this repository at the release tag.
 
+## Features added by this build
+- **Render Scale** (Options → Display): 100% / 75% / 60%. Lower values render fewer pixels, which helps GPU-bound scenes such as water.
+
+## Troubleshooting
+- **Wrong image or inaccessible menu after changing Render Scale:** edit `sm64config.txt` in the game folder and set `render_scale 0`, then restart.
+- **Graphical glitches (flicker, broken geometry):** create an empty `legacy_upload.txt` in the game folder and restart. Please report your device and GPU in an issue.
+- **Game closes:** attach `crash_native.txt` from the game folder when opening an issue.
+
 ---
 
 # Versión en español
